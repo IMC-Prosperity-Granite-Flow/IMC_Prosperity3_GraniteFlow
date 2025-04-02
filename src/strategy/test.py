@@ -69,7 +69,7 @@ trading_states = prepare_trading_state(csv_data)
 
 # 创建Trader对象并运行模拟
 trader = Trader()
-for trading_state in trading_states:
+for trading_state in trading_states[:1]:
     result, conversions, traderData = trader.run(trading_state)
     # 打印结果
     print("Result:", result)
