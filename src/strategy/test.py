@@ -1,6 +1,6 @@
 import csv
 from src.strategy.datamodel import OrderDepth, TradingState, Order, Trade
-from src.strategy.market_making import Trader
+from strategy.tutorial_v1 import Trader
 
 
 # 从CSV文件加载数据
