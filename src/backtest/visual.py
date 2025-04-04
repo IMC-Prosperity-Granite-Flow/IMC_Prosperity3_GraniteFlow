@@ -253,14 +253,17 @@ def log_message(timestamp, product, attr, value):
 def main():
     """示例主函数：解析日志、生成可视化。"""
     # 读取日志文件
-    log_file = "tutorial_v2.log"
+    print('Reading log file...')
+    log_file = "src/backtest/tutorial_v2.log"
     with open(log_file, "r", encoding="utf-8") as f:
         log_content = f.read()
 
     # 提取 Sandbox 日志中的四元组
+    print('Extracting sandbox quadruplets...')
     sandbox_quadruplets = extract_sandbox_quadruplets(log_content)
 
     # 加载订单簿与成交数据
+    print('Loading market data and trade history...')
     market_data, trade_history = _process_data_(log_file)
 
     record = Logger()
@@ -268,6 +271,7 @@ def main():
     record.record(00,"RAINFOREST_RESIN","test",666)
 
     # 启动交互式回放
+    print('Starting interactive replay...')
     interactive_orderbook(
         product="RAINFOREST_RESIN",
         df_orderbook=market_data,

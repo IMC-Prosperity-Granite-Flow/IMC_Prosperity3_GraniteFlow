@@ -250,8 +250,7 @@ class Trader:
         logger.print(state.position)
 
         conversions = 0
-
-        old_trader_data = json.loads(state.traderData) if state.traderData != "" else {}
+        old_trader_data = json.loads(state.traderData) if state.traderData != "" and state.traderData != {} else {}
         new_trader_data = {}
 
         orders = {}
