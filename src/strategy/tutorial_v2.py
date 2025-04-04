@@ -156,6 +156,7 @@ class Trader:
         while i > 0 and j > 0:
             ask_price, ask_amount = self.get_best_price(sell_orders, i)
             bid_price, bid_amount = self.get_best_price(buy_orders, j)
+            print(f'Dealing with depth {i}, {j}, ask_price: {ask_price}, ask_amount: {ask_amount}, bid_price: {bid_price}, bid_amount: {bid_amount}')
 
             if ask_price is None or bid_price is None:
                 print(f"[Warning] ask_price or bid_price is None at depth {i}, {j}")
@@ -251,7 +252,8 @@ class Trader:
 
                     print(f'Executing market making: Buy {amount} at {bid_price}, Sell {amount} at {ask_price}')
                 
-            if i <= 0 and j <= 0:
+            if i <= 0 or j <= 0:
+                print(f'Reach orderbook edge, i: {i}, j: {j}, exit loop')
                 break
             
         return orders
