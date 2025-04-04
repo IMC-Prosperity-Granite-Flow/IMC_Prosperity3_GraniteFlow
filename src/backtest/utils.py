@@ -1,5 +1,6 @@
 import io
 import json
+import re
 
 import  pandas as pd
 def _process_data_(file):
@@ -67,6 +68,59 @@ def load_market_data_from_log(log_file_path: str) -> pd.DataFrame:
     df_activities = extract_activities_log(log_file_path)
     # 如果活动日志里还有更多档位 (bid_price_2, bid_volume_2 等)，可以自行扩展
     return df_activities
+
+
+def extract_sandbox_quadruplets(log_content):
+    """
+    从日志内容中提取Sandbox日志的四元组 (timestamp, product, attr, value)
+    Args:
+        log_content (str): 日志内容
+    Returns:
+        list: 四元组列表，格式为 (timestamp, product, attr, value)
+    """
+    quadruplets = []
+
+    # 提取所有Sandbox日志块
+    sandbox_blocks = re.findall(r'{\s*"sandboxLog":.*?"timestamp": \d+\s*}', log_content, re.DOTALL)
+
+    for block in sandbox_blocks:
+        try:
+            # 解析JSON块
+            data = json.loads(block)
+            timestamp = data["timestamp"]
+            lambda_log = data["lambdaLog"]
+
+            # 提取产品交易信息
+            product_pattern = re.compile(
+                r'Trading (\w+).*?'
+                r'Fair price\s*:\s*([\d\.]+).*?'
+                r'Expect bid\s*:\s*([\d\.]+).*?'
+                r'Expect ask\s*:\s*([\d\.]+).*?'
+                r'Orderbook imbalance\s*:\s*([\d\-\.]+).*?'
+                r'Adjusted fair price:\s*([\d\.]+)',
+                re.DOTALL
+            )
+
+            # 匹配所有产品数据
+            for match in product_pattern.finditer(lambda_log):
+                product = match.group(1)
+                values = {
+                    "Fair price": float(match.group(2)),
+                    "Expected Bid": float(match.group(3)),
+                    "Expected Ask": float(match.group(4)),
+                    "Orderbook imbalance": float(match.group(5)),
+                    "Adjusted fair price": float(match.group(6))
+                }
+
+                # 生成四元组
+                for attr, value in values.items():
+                    quadruplets.append((timestamp, product, attr, value))
+
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"解析错误: {str(e)}")
+            continue
+
+    return quadruplets
 
 
 def extract_submission_trade_history_log(file_path: str) -> pd.DataFrame:

@@ -1,11 +1,17 @@
 import io
 import json
+
+from IPython.core.display_functions import clear_output
+
 from logger import  Logger
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from io import StringIO
 import pandas as pd
+import matplotlib.pyplot as plt
+import ipywidgets as widgets
+from IPython.display import display
 
 from utils import _process_data_,extract_activities_log
 
@@ -102,6 +108,8 @@ def print_orderbook_and_trades(df_orderbook: pd.DataFrame,
         print()  # 空行分隔
 
 
+
+
 if __name__ == "__main__":
     # 替换成实际的日志文件路径
     file_path = "tutorial_v1.log"
@@ -109,7 +117,6 @@ if __name__ == "__main__":
     record = Logger()
 
     record.record(199600,"RAINFOREST_RESIN","Test_attr",1024)
-
 
 
     if not market_data.empty:
