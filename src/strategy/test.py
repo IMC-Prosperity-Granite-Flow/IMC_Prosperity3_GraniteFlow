@@ -1,6 +1,6 @@
 import csv
 from src.strategy.datamodel import OrderDepth, TradingState, Order, Trade
-from strategy.tutorial_v2 import Trader
+from src.strategy.tutorial_v1 import Trader
 
 
 # 从CSV文件加载数据
@@ -49,7 +49,7 @@ def prepare_trading_state(csv_data):
 
         # Create a TradingState object for each timestamp
         trading_state = TradingState(
-            traderData="Test Data",  # Hypothetical traderData
+            traderData={},  # Hypothetical traderData
             timestamp=timestamp,
             listings={},
             order_depths=order_depths,
@@ -70,6 +70,7 @@ trading_states = prepare_trading_state(csv_data)
 # 创建Trader对象并运行模拟
 trader = Trader()
 for trading_state in trading_states[:1]:
+
     result, conversions, traderData = trader.run(trading_state)
     # 打印结果
     print("Result:", result)

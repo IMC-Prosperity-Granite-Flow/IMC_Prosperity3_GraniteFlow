@@ -32,11 +32,11 @@ class Trader:
             historical_prices = trader_data.get(product, [])
             print(f'Trading {product}')
 
-            fair_price = self.estimate_fair_price(state, product)
+            fair_price, _, _ = self.estimate_fair_price(state, product)
             historical_prices.append(fair_price)
 
             #控制历史数据长度
-            trader_data[product] = historical_prices[-100:]
+            trader_data[product] = historical_prices[-20:]
 
             #交易
             result[product] = self.trade(state, product, profit_pct_limit, position_limit, historical_prices)
@@ -55,8 +55,8 @@ class Trader:
         # 用市场买卖加权均价
         order_depth = state.order_depths.get(product, OrderDepth())
         if order_depth.buy_orders and order_depth.sell_orders:
-            best_bid = sum(price * amount for price, amount in order_depth.buy_orders.items()) / sum(amount for price, amount in order_depth.buy_orders.items())
-            best_ask = sum(price * amount for price, amount in order_depth.sell_orders.items()) / sum(amount for price, amount in order_depth.sell_orders.items())
+            best_bid = sum(price * amount  for price, amount in order_depth.buy_orders.items()) / sum(amount for price, amount in order_depth.buy_orders.items())
+            best_ask = sum(price * amount  for price, amount in order_depth.sell_orders.items()) / sum(amount for price, amount in order_depth.sell_orders.items())
             print('Using order depth to estimate fair price')
             fair_price = (best_bid + best_ask) / 2
             volatility = self.calculate_market_volatility(state, product)
@@ -79,8 +79,6 @@ class Trader:
         if not (0 <= depth < len(orders)):  
             return None, None
         return orders[depth][0], orders[depth][1] 
-    
-
 
     
     def calculate_market_volatility(self, state: TradingState, product: str) -> float:
@@ -148,7 +146,7 @@ class Trader:
         print(f'Position: {position}')
         momentum = self.price_momentum(historical_prices)
         print(f'Price momentum: {momentum:.2f}')
-        obi = self.orderbook_imbalance(state, product)
+        obi = self.orderbook_imbalance(state, product, fair_price)
         print(f'Orderbook imbalance: {obi:.2f}')
         fair_price = fair_price + (alpha * position + beta * momentum + gamma * obi)
         print(f'Adjusted fair price: {fair_price:.2f}, Alpha {alpha:.2f}, Beta {beta:.2f}, Gamma {gamma:.2f}')
@@ -184,6 +182,7 @@ class Trader:
             
             #主动交易
             #ask_price小于fair_price，直接买入
+            
             if ask_price < fair_price:
                 print(f'Asking price is lower than fair price, price: {ask_price}, fair_price: {fair_price}')
                 #最大可以买入的amount
@@ -191,6 +190,7 @@ class Trader:
                 orders.append(Order(product, ask_price, amount))
                 position += amount
                 i += 1
+
             #如果bid_price大于fair_price，直接买入
             if bid_price > fair_price:
                 print(f'Bidding price is higher than fair price, price: {bid_price}, fair_price: {fair_price}')
@@ -199,7 +199,29 @@ class Trader:
                 orders.append(Order(product, bid_price, -amount))
                 position -= amount
                 j += 1
+            '''
+            #结合订单簿不平衡度来判断
+            if ask_price < fair_price:
+                spread_pct = (fair_price - ask_price) / fair_price
+                obi_weight = max(0, min(1, obi))  # 限制在 [0,1] 之间
+                print(f'spread_pct: {spread_pct:.2f}, obi_weight: {obi_weight:.2f}')
+                if spread_pct > profit_pct_limit * (1 + obi_weight):  # 结合 OBI 限制
+                    amount = min(-ask_amount, position_limit - position)
+                    orders.append(Order(product, ask_price, amount))
+                    position += amount
+                    i += 1
 
+            if bid_price > fair_price:
+                spread_pct = (bid_price - fair_price) / fair_price
+                obi_weight = max(0, min(1, -obi))  # 取 OBI 的反向
+                if spread_pct > profit_pct_limit * (1 + obi_weight):  # 结合 OBI 限制
+                    amount = min(bid_amount, position_limit + position)
+                    orders.append(Order(product, bid_price, -amount))
+                    position -= amount
+                    j += 1
+
+            
+            '''
             '''
             这一部分也可以这样做，应该更加保守？待测试
             if ask_price < expect_ask:
@@ -255,22 +277,37 @@ class Trader:
         return orders
     
     
-    def orderbook_imbalance(self, state, product: str) -> float:
+    def orderbook_imbalance(self, state, product: str, fair_price: float) -> float:
+        """ 计算订单簿不平衡度 """  
         order_depth: OrderDepth = state.order_depths[product]
+        
         buy_orders = [(price, amount) for price, amount in order_depth.buy_orders.items()]
         sell_orders = [(price, amount) for price, amount in order_depth.sell_orders.items()]
 
-        # 计算加权的买卖总量
-        buy_pressure = sum(price * amount for price, amount in buy_orders)
-        sell_pressure = sum(price * amount for price, amount in sell_orders)
-        
-        total_pressure = buy_pressure + sell_pressure
+        # 根据价格离公平价的远近加权
+        buy_pressure = sum(amount * np.exp(-(fair_price - price)) for price, amount in buy_orders)
+        sell_pressure = sum(amount * np.exp(-(price - fair_price)) for price, amount in sell_orders)
 
+        total_pressure = buy_pressure + sell_pressure
         if total_pressure == 0:
-            return 0  # 避免除以0
-        
+            return 0
         return (buy_pressure - sell_pressure) / total_pressure
     
-    def price_momentum(self, historical_prices: List[int]) -> float:
+    @staticmethod
+    def calculate_ema(prices: List[float], span: int) -> float:
+        """ 计算指数移动平均 (EMA) """
+        if not prices:
+            return 0.0
+        alpha = 2 / (span + 1)  # EMA 平滑因子
+        ema = prices[0]  # 初始化为第一天的价格
+        for price in prices[1:]:
+            ema = alpha * price + (1 - alpha) * ema
+        print(f'EMA({span}) = {ema:.2f}')
+        return ema
 
-        return 0.0
+    def price_momentum(self, historical_prices: List[int]) -> float:
+        '''计算价格动量'''
+        print(f'historical', historical_prices[-20:])
+        short_ema = self.calculate_ema(historical_prices[-20:], 5)
+        long_ema = self.calculate_ema(historical_prices[-20:], 20)
+        return short_ema - long_ema
