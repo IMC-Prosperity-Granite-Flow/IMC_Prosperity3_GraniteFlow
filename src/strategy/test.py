@@ -1,5 +1,6 @@
 import csv
 from src.strategy.datamodel import OrderDepth, TradingState, Order, Trade
+#src.strategy.your_strategy_file import YourStrategyClass
 from src.strategy.tutorial_v2 import Trader
 
 
@@ -30,11 +31,11 @@ def prepare_trading_state(csv_data):
             int(row['bid_price_2']) if row['bid_price_2'] else 0: int(row['bid_volume_2']) if row['bid_volume_2'] else 0,
             int(row['bid_price_3']) if row['bid_price_3'] else 0: int(row['bid_volume_3']) if row['bid_volume_3'] else 0
         }
-        
+        #注意ask_volume 总是负数
         sell_orders = {
-            int(row['ask_price_1']) if row['ask_price_1'] else 0: int(row['ask_volume_1']) if row['ask_volume_1'] else 0,
-            int(row['ask_price_2']) if row['ask_price_2'] else 0: int(row['ask_volume_2']) if row['ask_volume_2'] else 0,
-            int(row['ask_price_3']) if row['ask_price_3'] else 0: int(row['ask_volume_3']) if row['ask_volume_3'] else 0
+            int(row['ask_price_1']) if row['ask_price_1'] else 0: -int(row['ask_volume_1']) if row['ask_volume_1'] else 0,
+            int(row['ask_price_2']) if row['ask_price_2'] else 0: -int(row['ask_volume_2']) if row['ask_volume_2'] else 0,
+            int(row['ask_price_3']) if row['ask_price_3'] else 0: -int(row['ask_volume_3']) if row['ask_volume_3'] else 0
         }
         
         # Create OrderDepth object

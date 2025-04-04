@@ -285,9 +285,9 @@ class Trader:
         buy_orders = [(price, amount) for price, amount in order_depth.buy_orders.items()]
         sell_orders = [(price, amount) for price, amount in order_depth.sell_orders.items()]
 
-        # 根据价格离公平价的远近加权
-        buy_pressure = sum(amount * np.exp(-(fair_price - price)) for price, amount in buy_orders)
-        sell_pressure = sum(amount * np.exp(-(price - fair_price)) for price, amount in sell_orders)
+        # 根据价格离公平价的远近加权，只使用不为0的价格，避免计算指数后溢出
+        buy_pressure = sum(amount * np.exp(-(fair_price - price)) for price, amount in buy_orders if price != 0)
+        sell_pressure = sum(amount * np.exp(-(price - fair_price)) for price, amount in sell_orders if price != 0)
 
         total_pressure = buy_pressure + sell_pressure
         if total_pressure == 0:
