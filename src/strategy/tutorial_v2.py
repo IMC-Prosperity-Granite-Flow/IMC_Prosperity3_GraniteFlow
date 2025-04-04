@@ -32,11 +32,11 @@ class Trader:
             historical_prices = trader_data.get(product, [])
             print(f'Trading {product}')
 
-            fair_price = self.estimate_fair_price(state, product)
+            fair_price, _, _ = self.estimate_fair_price(state, product)
             historical_prices.append(fair_price)
 
             #控制历史数据长度
-            trader_data[product] = historical_prices[-100:]
+            trader_data[product] = historical_prices[-20:]
 
             #交易
             result[product] = self.trade(state, product, profit_pct_limit, position_limit, historical_prices)
@@ -66,11 +66,11 @@ class Trader:
             return fair_price, expect_bid, expect_ask
         else:
             if product == 'KELP':
-                print('Using default price of 2025')
-                return 2025
+                print(f'Product {product} has no order depth. Using default price of 2025')
+                return 2025,1 , 1
             if product == 'RAINFOREST_RESIN':
-                print('Using default price of 10000')
-                return 10000
+                print(f'Product {product} has no order depth. Using default price of 10000')
+                return 10000, 1,1 
 
 
     def get_best_price(self, orders: list, depth: int):
@@ -81,8 +81,6 @@ class Trader:
         return orders[depth][0], orders[depth][1] 
     
 
-
-    
     def calculate_market_volatility(self, state: TradingState, product: str) -> float:
     # 计算市场的波动性，可以用标准差来衡量
         recent_trades = state.market_trades.get(product, [])
@@ -130,7 +128,7 @@ class Trader:
         sell_orders = [list(order) for order in order_depth.sell_orders.items()]
         orders: List[Order] = []
         position = state.position.get(product, 0)
-        print("Buy Order depth : " + str(len(buy_orders)) + ", Sell order depth : " + str(len(sell_orders)))
+        print(f"Product {product} ,Buy Order depth : " + str(len(buy_orders)) + f", Product {product}, Sell order depth : " + str(len(sell_orders)))
 
         #从深到前检查订单簿
         i, j = len(sell_orders)-1, len(buy_orders)-1
@@ -138,20 +136,21 @@ class Trader:
         #暂时锁死resin的fair_price
         if product == 'RAINFOREST_RESIN':
             fair_price = 10000
-        print("Fair price : " + str(fair_price))
-        print("Expect bid : " + str(expect_bid))
-        print("Expect ask : " + str(expect_ask))
+        print(f"Product {product}, Fair price : " + str(fair_price))
+        print(f"Product {product}, Expect bid : " + str(expect_bid))
+        print(f"Product {product}, Expect ask : " + str(expect_ask))
         #根据持仓、动量预测、订单簿不平衡度调整fair price
         alpha = 0
         beta = 0
         gamma = 0
-        print(f'Position: {position}')
-        momentum = self.price_momentum(historical_prices)
-        print(f'Price momentum: {momentum:.2f}')
+        print(f'Product {product}, Position: {position}')
+        print(product, type(product))
+        momentum = self.price_momentum(historical_prices, product)
+        print(f'Product {product}, Price momentum: {momentum:.2f}')
         obi = self.orderbook_imbalance(state, product)
-        print(f'Orderbook imbalance: {obi:.2f}')
+        print(f'Product {product}, Orderbook imbalance: {obi:.2f}')
         fair_price = fair_price + (alpha * position + beta * momentum + gamma * obi)
-        print(f'Adjusted fair price: {fair_price:.2f}, Alpha {alpha:.2f}, Beta {beta:.2f}, Gamma {gamma:.2f}')
+        print(f'Product {product}, Adjusted fair price: {fair_price:.2f}, Alpha {alpha:.2f}, Beta {beta:.2f}, Gamma {gamma:.2f}')
 
         while i > 0 and j > 0:
             ask_price, ask_amount = self.get_best_price(sell_orders, i)
@@ -159,34 +158,34 @@ class Trader:
             print(f'Dealing with depth {i}, {j}, ask_price: {ask_price}, ask_amount: {ask_amount}, bid_price: {bid_price}, bid_amount: {bid_amount}')
 
             if ask_price is None or bid_price is None:
-                print(f"[Warning] ask_price or bid_price is None at depth {i}, {j}")
+                print(f"[Warning] Product {product}, ask_price or bid_price is None at depth {i}, {j}")
                 break  # 防止死循环
 
             if ask_amount == 0:
-                print(f'Ask amount at depth {i} has been fully filled. Skipping')
+                print(f'Product {product}, Ask amount at depth {i} has been fully filled. Skipping')
                 i -= 1
                 continue
             if bid_amount == 0:
-                print(f'Bid amount at depth {j} has been fully filled. Skipping')
+                print(f'Product {product}, Bid amount at depth {j} has been fully filled. Skipping')
                 j -= 1
                 continue
             
             if ask_price is None:
-                print(f'Ask price at depth {i} is None. Skipping')
+                print(f'Product {product}, Ask price at depth {i} is None. Skipping')
                 i -= 1
                 continue
             if bid_price is None:
-                print(f'Bid price at depth {j} is None. Skipping')
+                print(f'Product {product}, Bid price at depth {j} is None. Skipping')
                 j -= 1
                 continue
 
-            print(f'depth of ask order: {i}, price: {ask_price}, amount: {ask_amount}')
-            print(f'depth of bid order: {j}, price: {bid_price}, amount: {bid_amount}')
+            print(f'Product {product}, depth of ask order: {i}, price: {ask_price}, amount: {ask_amount}')
+            print(f'Product {product}, depth of bid order: {j}, price: {bid_price}, amount: {bid_amount}')
             
             #主动交易
             #ask_price小于fair_price，直接买入
             if ask_price < fair_price:
-                print(f'Asking price is lower than fair price, price: {ask_price}, fair_price: {fair_price}')
+                print(f'Product {product}. Asking price is lower than fair price, price: {ask_price}, fair_price: {fair_price}')
                 #最大可以买入的amount
                 amount = min(-ask_amount, position_limit - position)
                 orders.append(Order(product, ask_price, amount))
@@ -194,7 +193,7 @@ class Trader:
                 i -= 1
             #如果bid_price大于fair_price，直接买入
             if bid_price > fair_price:
-                print(f'Bidding price is higher than fair price, price: {bid_price}, fair_price: {fair_price}')
+                print(f'Product {product}. Bidding price is higher than fair price, price: {bid_price}, fair_price: {fair_price}')
                 #最大可卖出（做空）的amount
                 amount = min(bid_amount, position_limit + position)
                 orders.append(Order(product, bid_price, -amount))
@@ -219,30 +218,30 @@ class Trader:
             ask_price -= 1
             bid_price += 1
             if spread / fair_price > profit_pct_limit:
-                print(f'Spread is profitable, spread_pct: {spread/fair_price*100:.2f}')
+                print(f'Product {product}. Spread is profitable, spread_pct: {spread/fair_price*100:.2f}')
                 amount = min(-ask_amount, bid_amount)
                 if position > 0:  
                     # 如果当前持仓为正，优先卖出
-                    print(f'Current position is positive {position}, selling')
+                    print(f'Product {product}, Current position is negative {position}, buying to close position')
                     sell_amount = min(amount, position + position_limit)
                     orders.append(Order(product, ask_price, -sell_amount))
                     sell_orders[i][1] += sell_amount
                     position -= sell_amount
                     i -= 1
-                    print(f'Selling {sell_amount} at {ask_price}, Current position {position}')
+                    print(f'Selling product {product}, selling {sell_amount} at {ask_price}, Current position {position}')
                 elif position < 0:
                     # 如果当前持仓为负，优先买入平仓
-                    print(f'Current position is negative {position}, buying to close position')
+                    print(f'Product {product}, Current position is negative {position}, buying to close position')
                     buy_amount = min(amount, position_limit - position)  #仓位限制
                     orders.append(Order(product, bid_price, buy_amount))
                     buy_orders[j][1] -= buy_amount
                     position += buy_amount
                     j -= 1
-                    print(f'Buying {buy_amount} at {bid_price}, Current position {position}')
+                    print(f'Buying product {product}, buying {buy_amount} at {bid_price}, Current position {position}')
                 else:
                     # 如果没有持仓，同时买入和卖出
                     amount = min(amount, position_limit) #仓位限制
-                    print('No position, executing market making')
+                    print(f'Product {product}, No position, executing market making')
                     orders.append(Order(product, bid_price, amount))
                     orders.append(Order(product, ask_price, -amount))
                     buy_orders[j][1] -= amount
@@ -250,10 +249,10 @@ class Trader:
                     i -= 1
                     j -= 1
 
-                    print(f'Executing market making: Buy {amount} at {bid_price}, Sell {amount} at {ask_price}')
+                    print(f'Executing market making: Product {product}, Buy {amount} at {bid_price}, Sell {amount} at {ask_price}')
                 
             if i <= 0 or j <= 0:
-                print(f'Reach orderbook edge, i: {i}, j: {j}, exit loop')
+                print(f'Product {product}, Reach orderbook edge, i: {i}, j: {j}, exit loop')
                 break
             
         return orders
@@ -275,6 +274,20 @@ class Trader:
         
         return (buy_pressure - sell_pressure) / total_pressure
     
-    def price_momentum(self, historical_prices: List[int]) -> float:
+    def calculate_ema(self, prices: List[float], span: int, product: str) -> float:
+        """ 计算指数移动平均 (EMA) """
+        if not prices:
+            return 0.0
+        alpha = 2 / (span + 1)  # EMA 平滑因子
+        ema = prices[0]  # 初始化为第一天的价格
+        for price in prices[1:]:
+            ema = alpha * price + (1 - alpha) * ema
+        print(f'Product {product}, EMA({span}) = {ema:.2f}')
+        return ema
 
-        return 0.0
+    def price_momentum(self, historical_prices: List[int], product: str) -> float:
+        '''计算价格动量'''
+        print(f'Product {product}, historical prices:', historical_prices[-20:])
+        short_ema = self.calculate_ema(historical_prices[-20:], 5, product)
+        long_ema = self.calculate_ema(historical_prices[-20:], 20, product)
+        return short_ema - long_ema
