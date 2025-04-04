@@ -112,11 +112,11 @@ def print_orderbook_and_trades(df_orderbook: pd.DataFrame,
 
 if __name__ == "__main__":
     # 替换成实际的日志文件路径
-    file_path = "tutorial_v1.log"
+    file_path = "src/backtest/tutorial_v1.log"
     market_data, trade_history = _process_data_(file_path)
     record = Logger()
 
-    record.record(199600,"RAINFOREST_RESIN","Test_attr",1024)
+    #record.record(199600,"RAINFOREST_RESIN","Test_attr",1024)
 
 
     if not market_data.empty:

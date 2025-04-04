@@ -36,18 +36,19 @@ if __name__ == "__main__":
         "KELP": 50
     }
 
-    log_file = "tutorial_v1.log"
+    log_file = "src/backtest/tutorial_v1.log"
     market_data, trade_history = _process_data_(log_file)
 
     fair_marks = {}
     fair_calculations = {
     }
-#    # 4. 初始化策略（Trader）和回测器（BackTester）
+    # 4. 初始化策略（Trader）和回测器（BackTester）
     strategy = Trader()
-    backtester = Backtester(strategy, listings, position_limit, fair_calculations, market_data, trade_history, "beckTest.log")
+    backtester = Backtester(strategy, listings, position_limit, fair_calculations, market_data, trade_history, "backTest.log")
 
     # 4. 运行回测
     backtester.run()
-    print(backtester.current_position)
-    print(backtester.cash)
+    print('current_position',backtester.current_position)
+    print('cash',backtester.cash)
+    print('pnl',backtester.pnl)
 
