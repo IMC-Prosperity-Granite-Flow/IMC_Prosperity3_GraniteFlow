@@ -14,11 +14,11 @@ class Trader:
             try:
                 trader_data = json.loads(state.traderData)
             except json.JSONDecodeError:
-                print(f"Warning: Failed to decode traderData: {state.traderData}")
+                #print(f"Warning: Failed to decode traderData: {state.traderData}")
                 trader_data = {}
 
-        print("traderData (Loaded):", json.dumps(trader_data))
-        print("Observations: " + str(state.observations))
+        #print("traderData (Loaded):", json.dumps(trader_data))
+        #print("Observations: " + str(state.observations))
         result = {}
         print("Current position :", state.position)
         profit_pct_limit = 0.001
