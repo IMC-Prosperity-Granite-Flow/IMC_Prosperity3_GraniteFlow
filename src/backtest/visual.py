@@ -254,7 +254,7 @@ def main():
     """示例主函数：解析日志、生成可视化。"""
     # 读取日志文件
     print('Reading log file...')
-    log_file = "src/backtest/tutorial_v2.log"
+    log_file = "src/backtest/tutorial_v1.log"
     with open(log_file, "r", encoding="utf-8") as f:
         log_content = f.read()
 
@@ -268,7 +268,7 @@ def main():
 
     record = Logger()
 
-    record.record(00,"RAINFOREST_RESIN","test",666)
+    #record.record(00,"RAINFOREST_RESIN","test",666)
 
     # 启动交互式回放
     print('Starting interactive replay...')
