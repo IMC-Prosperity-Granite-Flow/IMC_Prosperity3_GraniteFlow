@@ -124,8 +124,8 @@ logger = Logger()
 class Trader:
     def __init__(self):
         self.kelp_prices = []
-        self.starfruit_prices = []
-        self.starfruit_vwap = []
+        self.resin_prices = []
+        self.resin_vwap = []
 
     def run(self, state: TradingState):
         
@@ -144,10 +144,10 @@ class Trader:
         logger.print("Current position :", state.position)
 
         # Set params
-        starfruit_make_width = 3.5
-        starfruit_take_width = 1
-        starfruit_position_limit = 50
-        starfruit_timemspan = 10
+        resin_make_width = 3.5
+        resin_take_width = 1
+        resin_position_limit = 50
+        resin_timemspan = 10
         
         position_limit = 50
         for product in state.order_depths:
@@ -169,12 +169,12 @@ class Trader:
                 result[product] = self.trade(state, product, profit_pct_limit, position_limit, self.kelp_prices)
 
             if product == 'RAINFOREST_RESIN':
-                starfruit_position = state.position["RAINFOREST_RESIN"] if "RAINFOREST_RESIN" in state.position else 0
-                starfruit_orders = self.starfruit_orders(state.order_depths["RAINFOREST_RESIN"], starfruit_timemspan, starfruit_make_width, starfruit_take_width, starfruit_position, starfruit_position_limit)
-                result["RAINFOREST_RESIN"] = starfruit_orders
+                resin_position = state.position["RAINFOREST_RESIN"] if "RAINFOREST_RESIN" in state.position else 0
+                resin_orders = self.resin_orders(state.order_depths["RAINFOREST_RESIN"], resin_timemspan, resin_make_width, resin_take_width, resin_position, resin_position_limit)
+                result["RAINFOREST_RESIN"] = resin_orders
 
         # 使用 jsonpickle 进行编码
-        trader_data = jsonpickle.encode({"kelp_prices,": self.kelp_prices, "starfruit_prices": self.starfruit_prices,"starfruit_vwap": self.starfruit_vwap})
+        trader_data = jsonpickle.encode({"kelp_prices,": self.kelp_prices, "resin_prices": self.resin_prices,"resin_vwap": self.resin_vwap})
         
         # String value holding Trader state data required. It will be delivered as TradingState.traderData on next execution.
         
@@ -316,7 +316,7 @@ class Trader:
                 break
             
         return orders
-    def starfruit_fair_value(self, order_depth: OrderDepth, method = "mid_price", min_vol = 0) -> float:
+    def resin_fair_value(self, order_depth: OrderDepth, method = "mid_price", min_vol = 0) -> float:
         if method == "mid_price":
             best_ask = min(order_depth.sell_orders.keys())
             best_bid = max(order_depth.buy_orders.keys())
@@ -364,7 +364,7 @@ class Trader:
         return buy_order_volume, sell_order_volume
     
 
-    def starfruit_fair_value(self, order_depth: OrderDepth, method = "mid_price", min_vol = 0) -> float:
+    def resin_fair_value(self, order_depth: OrderDepth, method = "mid_price", min_vol = 0) -> float:
         if method == "mid_price":
             best_ask = min(order_depth.sell_orders.keys())
             best_bid = max(order_depth.buy_orders.keys())
@@ -382,7 +382,7 @@ class Trader:
                 mid_price = (best_ask + best_bid) / 2
             return mid_price
 
-    def starfruit_orders(self, order_depth: OrderDepth, timespan:int, width: float, starfruit_take_width: float, position: int, position_limit: int) -> List[Order]:
+    def resin_orders(self, order_depth: OrderDepth, timespan:int, width: float, resin_take_width: float, position: int, position_limit: int) -> List[Order]:
         orders: List[Order] = []
 
         buy_order_volume = 0
@@ -398,25 +398,25 @@ class Trader:
             mm_bid = max(filtered_bid) if len(filtered_bid) > 0 else best_bid
             
             mmmid_price = (mm_ask + mm_bid) / 2    
-            self.starfruit_prices.append(mmmid_price)
+            self.resin_prices.append(mmmid_price)
 
             volume = -1 * order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
             vwap = (best_bid * (-1) * order_depth.sell_orders[best_ask] + best_ask * order_depth.buy_orders[best_bid]) / volume
-            self.starfruit_vwap.append({"vol": volume, "vwap": vwap})
+            self.resin_vwap.append({"vol": volume, "vwap": vwap})
             
-            if len(self.starfruit_vwap) > timespan:
-                self.starfruit_vwap.pop(0)
+            if len(self.resin_vwap) > timespan:
+                self.resin_vwap.pop(0)
             
-            if len(self.starfruit_prices) > timespan:
-                self.starfruit_prices.pop(0)
+            if len(self.resin_prices) > timespan:
+                self.resin_prices.pop(0)
         
-            fair_value = sum([x["vwap"]*x['vol'] for x in self.starfruit_vwap]) / sum([x['vol'] for x in self.starfruit_vwap])
+            fair_value = sum([x["vwap"]*x['vol'] for x in self.resin_vwap]) / sum([x['vol'] for x in self.resin_vwap])
             
             fair_value = mmmid_price
 
             # take all orders we can
             # for ask in order_depth.sell_orders.keys():
-            #     if ask <= fair_value - starfruit_take_width:
+            #     if ask <= fair_value - resin_take_width:
             #         ask_amount = -1 * order_depth.sell_orders[ask]
             #         if ask_amount <= 20:
             #             quantity = min(ask_amount, position_limit - position)
@@ -425,7 +425,7 @@ class Trader:
             #                 buy_order_volume += quantity
             
             # for bid in order_depth.buy_orders.keys():
-            #     if bid >= fair_value + starfruit_take_width:
+            #     if bid >= fair_value + resin_take_width:
             #         bid_amount = order_depth.buy_orders[bid]
             #         if bid_amount <= 20:
             #             quantity = min(bid_amount, position_limit + position)
@@ -435,14 +435,14 @@ class Trader:
 
             # only taking best bid/ask
         
-            if best_ask <= fair_value - starfruit_take_width:
+            if best_ask <= fair_value - resin_take_width:
                 ask_amount = -1 * order_depth.sell_orders[best_ask]
                 if ask_amount <= 20:
                     quantity = min(ask_amount, position_limit - position)
                     if quantity > 0:
                         orders.append(Order("RAINFOREST_RESIN", best_ask, quantity))
                         buy_order_volume += quantity
-            if best_bid >= fair_value + starfruit_take_width:
+            if best_bid >= fair_value + resin_take_width:
                 bid_amount = order_depth.buy_orders[best_bid]
                 if bid_amount <= 20:
                     quantity = min(bid_amount, position_limit + position)
