@@ -47,7 +47,7 @@ class Trader:
         # String value holding Trader state data required. It will be delivered as TradingState.traderData on next execution.
         
         conversions = 1
-        print('result: ', result)
+        print('Result: ', result)
         return result, conversions, traderData
     
     def estimate_fair_price(self, state: TradingState, product: str) -> int:
@@ -187,7 +187,7 @@ class Trader:
                 print(f'Product {product}. Asking price is lower than fair price, price: {ask_price}, fair_price: {fair_price}')
                 #最大可以买入的amount
                 amount = min(-ask_amount, position_limit - position)
-                orders.append(Order(product, ask_price, -amount)) # 买入时传入-amount
+                orders.append(Order(product, ask_price, amount)) # 买入时传入amount
                 sell_orders[j][1] += amount
                 position += amount
 
@@ -196,7 +196,7 @@ class Trader:
                 print(f'Product {product}. Bidding price is higher than fair price, price: {bid_price}, fair_price: {fair_price}')
                 #最大可卖出（做空）的amount
                 amount = min(bid_amount, position_limit + position)
-                orders.append(Order(product, bid_price, amount)) # 卖出时传入amount
+                orders.append(Order(product, bid_price, -amount)) # 卖出时传入-amount
                 buy_orders[j][1] -= amount
                 position -= amount
 
@@ -225,7 +225,7 @@ class Trader:
                     print(f'Product {product}, Current position is negative {position}, buying to close position')
                     #只卖出到平仓
                     sell_amount = min(-ask_amount, position)
-                    orders.append(Order(product, ask_price, -sell_amount))
+                    orders.append(Order(product, ask_price, -sell_amount))#卖出时传入-amount
                     sell_orders[i][1] += sell_amount
                     position -= sell_amount
                     print(f'Selling product {product}, selling {sell_amount} at {ask_price}, Current position {position}')
@@ -233,7 +233,7 @@ class Trader:
                     # 如果当前持仓为负，优先买入平仓
                     print(f'Product {product}, Current position is negative {position}, buying to close position')
                     buy_amount = min(bid_amount, -position)  #仓位限制
-                    orders.append(Order(product, bid_price, buy_amount))
+                    orders.append(Order(product, bid_price, buy_amount))#买入时传入amount
                     buy_orders[j][1] -= buy_amount
                     position += buy_amount
                     print(f'Buying product {product}, buying {buy_amount} at {bid_price}, Current position {position}')
@@ -242,8 +242,8 @@ class Trader:
                     amount = min(-ask_amount, bid_amount)
                     amount = min(amount, position_limit) #仓位限制
                     print(f'Product {product}, No position, executing market making')
-                    orders.append(Order(product, bid_price, -amount))
-                    orders.append(Order(product, ask_price, amount))
+                    orders.append(Order(product, bid_price, amount))#买入时传入amount
+                    orders.append(Order(product, ask_price, -amount))#卖出时传入-amount
                     buy_orders[j][1] -= amount
                     sell_orders[i][1] += amount
 
