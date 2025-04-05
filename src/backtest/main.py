@@ -9,7 +9,7 @@ import json
 from collections import defaultdict
 from io import StringIO
 from backtester import  Backtester
-from trader import  Trader
+from src.strategy.tutorial_v2 import  Trader
 from utils import  _process_data_
 # ------------------------
 # 引入你已有的 datamodel (TradingState, OrderDepth, Trade, Order, Listing, Observation等)
@@ -36,7 +36,7 @@ if __name__ == "__main__":
         "KELP": 50
     }
 
-    log_file = "tutorial_v1.log"
+    log_file = "data/log/tutorial_v1.log"
     market_data, trade_history = _process_data_(log_file)
 
     fair_marks = {}
@@ -50,4 +50,5 @@ if __name__ == "__main__":
     backtester.run()
     print(backtester.current_position)
     print(backtester.cash)
+    print(backtester.pnl)
 
