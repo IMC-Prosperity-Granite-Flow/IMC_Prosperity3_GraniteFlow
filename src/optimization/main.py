@@ -3,6 +3,7 @@ import re
 import random
 import os 
 import json
+from prosperity3bt import runner
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
