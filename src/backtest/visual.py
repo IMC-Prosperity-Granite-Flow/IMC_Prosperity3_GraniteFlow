@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 import pandas as pd
+from collections import deque
 
 from logger import Logger
 from utils import _process_data_, extract_sandbox_quadruplets
@@ -111,7 +112,37 @@ def interactive_orderbook(product: str,
     if not valid_ts:
         print(f"没有找到产品 {product} 的有效数据。")
         return
+    
+    #计算仓位和成本
+    def calculate_position_cost_pnl(trades_df):
+        """计算当前持仓、成本、已实现盈亏"""
+        position = 0
+        cost = 0
+        avg_cost = 0
+        realized_pnl = 0
+        position_records = {}
 
+        for _, row in trades_df.sort_values(by='timestamp').iterrows():
+            ts = row['timestamp']
+            price = row['price']
+            qty = row['quantity']
+
+            if row['buyer'] == 'SUBMISSION':
+                position += qty
+                cost += price * qty
+            elif row['seller'] == 'SUBMISSION':
+                if position > 0:
+                    realized_pnl += (price - avg_cost) * qty
+                    cost -= avg_cost * qty
+                position -= qty
+
+            avg_cost = cost / position if position != 0 else 0
+            position_records[ts] = (position, avg_cost, realized_pnl)
+
+        return position_records
+    position_records = calculate_position_cost_pnl(df_trades[df_trades['symbol'] == product])
+
+    
     # 3) 准备画布
     fig = plt.figure(figsize=(10, 7))
     ax_orderbook = plt.subplot2grid((4, 1), (0, 0), rowspan=3)
@@ -209,6 +240,14 @@ def interactive_orderbook(product: str,
                 else:
                     info_lines.append("\n📝 Logger: 无记录")
 
+        # 4) 仓位和成本
+              # 持仓与成本
+        if current_ts in position_records:
+            pos, cost, pnl = position_records[current_ts]
+            info_lines.append(f"\n📊 仓位: {pos}")
+            info_lines.append(f"💰 成本均价: {cost:.2f}")
+            info_lines.append(f"📈 已实现PnL: {pnl:.2f}")
+
         ax_info.text(
             0.02, 0.95, "\n".join(info_lines),
             transform=ax_info.transAxes,
@@ -273,7 +312,7 @@ def main():
     # 启动交互式回放
     print('Starting interactive replay...')
     interactive_orderbook(
-        product="RAINFOREST_RESIN",
+        product="KELP",
         df_orderbook=market_data,
         df_trades=trade_history,
         sandbox_data=sandbox_quadruplets,
