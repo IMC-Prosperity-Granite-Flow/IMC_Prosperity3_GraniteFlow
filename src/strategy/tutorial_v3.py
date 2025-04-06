@@ -316,6 +316,7 @@ class Trader:
                 break
             
         return orders
+    
     def resin_fair_value(self, order_depth: OrderDepth, method = "mid_price", min_vol = 0) -> float:
         if method == "mid_price":
             best_ask = min(order_depth.sell_orders.keys())
@@ -363,24 +364,6 @@ class Trader:
     
         return buy_order_volume, sell_order_volume
     
-
-    def resin_fair_value(self, order_depth: OrderDepth, method = "mid_price", min_vol = 0) -> float:
-        if method == "mid_price":
-            best_ask = min(order_depth.sell_orders.keys())
-            best_bid = max(order_depth.buy_orders.keys())
-            mid_price = (best_ask + best_bid) / 2
-            return mid_price
-        elif method == "mid_price_with_vol_filter":
-            if len([price for price in order_depth.sell_orders.keys() if abs(order_depth.sell_orders[price]) >= min_vol]) ==0 or len([price for price in order_depth.buy_orders.keys() if abs(order_depth.buy_orders[price]) >= min_vol]) ==0:
-                best_ask = min(order_depth.sell_orders.keys())
-                best_bid = max(order_depth.buy_orders.keys())
-                mid_price = (best_ask + best_bid) / 2
-                return mid_price
-            else:   
-                best_ask = min([price for price in order_depth.sell_orders.keys() if abs(order_depth.sell_orders[price]) >= min_vol])
-                best_bid = max([price for price in order_depth.buy_orders.keys() if abs(order_depth.buy_orders[price]) >= min_vol])
-                mid_price = (best_ask + best_bid) / 2
-            return mid_price
 
     def resin_orders(self, order_depth: OrderDepth, timespan:int, width: float, resin_take_width: float, position: int, position_limit: int) -> List[Order]:
         orders: List[Order] = []
