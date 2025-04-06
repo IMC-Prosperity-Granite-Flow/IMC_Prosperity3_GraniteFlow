@@ -253,11 +253,11 @@ class Strategy(ABC):
         
         # 状态预处理
         order_depth = state.order_depths.get(self.symbol, OrderDepth())
-        if not order_depth.buy_orders or not order_depth.sell_orders:
+        if not order_depth.buy_orders and not order_depth.sell_orders:
             return [], {}
             
         # 生成订单
-        self.generate_orders(state)
+        self.orders = self.generate_orders(state)
         
         # 保存策略状态
         strategy_state = self.save_state()
@@ -274,56 +274,93 @@ class Strategy(ABC):
 
 class KelpStrategy(Strategy):
     """海带做市策略"""
-    def __init__(self, symbol: str, position_limit: int):
+    def __init__(self, symbol: str, position_limit: int, take_position1: int, take_position2: int):
         super().__init__(symbol, position_limit)
         # 添加海带策略特有参数
-        self.take_position1 = 0
-        self.take_position2 = 0
-        
+        self.symbol = symbol
+        self.position_limit = position_limit
+        self.take_position1 = take_position1
+        self.take_position2 = take_position2
+            
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """加权中间价估值"""
-        def weighted_avg(orders: Dict[int, int], n=3) -> float:
-            sorted_orders = sorted(orders.items(), key=lambda x: x[0], reverse=True)
-            total_volume = sum(abs(v) for _,v in sorted_orders[:n])
-            return sum(p*abs(v) for p,v in sorted_orders[:n]) / total_volume if total_volume else 0
-        
-        buy_avg = weighted_avg(order_depth.buy_orders)
-        sell_avg = weighted_avg(order_depth.sell_orders)
+        """基于订单簿前三档的加权中间价计算"""
+
+        def weighted_avg(prices_vols, n=3):
+            total_volume = 0
+            price_sum = 0
+            # 按价格排序（买单调降序，卖单调升序）
+            sorted_orders = sorted(prices_vols.items(),
+                                   key=lambda x: x[0],
+                                   reverse=isinstance(prices_vols, dict))
+
+            # 取前n档或全部可用档位
+            for price, vol in sorted_orders[:n]:
+                abs_vol = abs(vol)
+                price_sum += price * abs_vol
+                total_volume += abs_vol
+            return price_sum / total_volume if total_volume > 0 else 0
+
+        # 计算买卖方加权均价
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+
+        # 返回中间价
         return (buy_avg + sell_avg) / 2
     
     def generate_orders(self, state: TradingState) -> List[Order]:
+        logger.print(f"Current position: {state.position.get(self.symbol, 0)}, take_position1: {self.take_position1}, take_position2: {self.take_position2}")
         current_position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
         fair_value = self.calculate_fair_value(order_depth)
         
         orders = []
+
         # 吃单逻辑
         for ask, vol in sorted(order_depth.sell_orders.items()):
             if ask < fair_value:
-                quantity = min(-vol, self.position_limit - current_position)
-                if quantity > 0:
-                    orders.append(Order(self.symbol, ask, quantity))
-                    self.take_position1 += quantity
-        
+                # 计算最大可买量
+                buyable = min(-vol, self.position_limit - current_position)
+                if buyable > 0:
+                    orders.append(Order(self.symbol, ask, buyable))
+                    self.take_position1 += buyable
+            else:
+                break  # 后续价格更高，不再处理
+
+        for bid, vol in sorted(order_depth.buy_orders.items(), reverse=True):
+            if bid > fair_value:
+                # 计算最大可卖量
+                sellable = min(vol, self.position_limit + current_position)
+                if sellable > 0:
+                    orders.append(Order(self.symbol, bid, -sellable))
+                    self.take_position2 += sellable
+            else:
+                break  # 后续价格更低，不再处理
+
         # 挂单逻辑
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        if (best_ask - best_bid) > 2:
-            desired_price = round((best_bid + best_ask) / 2)
-            available_qty = self.position_limit - abs(current_position)
-            if available_qty > 0:
-                orders.append(Order(self.symbol, desired_price, available_qty))
-        
+        spread = best_ask - best_bid
+        if spread > 2:
+            desired_bid = best_bid + 1
+            desired_ask = best_ask - 1
+
+            available_buy = max(0, self.position_limit - current_position)
+            available_sell = max(0, self.position_limit + current_position)
+            desired_buy = available_buy - self.take_position1
+            desired_sell = available_sell - self.take_position2
+
+            if desired_buy > 0:
+                orders.append(Order(self.symbol, desired_bid, desired_buy))
+            if desired_sell > 0:
+                orders.append(Order(self.symbol, desired_ask, -desired_sell))
+        logger.print(f"Current position: {current_position}, take_position1: {self.take_position1}, take_position2: {self.take_position2}")
         return orders
     
     def save_state(self) -> dict:
-        return {
-            "take_positions": [self.take_position1, self.take_position2]
-        }
+        return {}
     
     def load_state(self, data: dict):
-        if data:
-            self.take_position1, self.take_position2 = data.get("take_positions", [0,0])
+        pass
 
 class RainforestResinStrategy(Strategy):
     """树脂动态做市策略"""
@@ -361,7 +398,22 @@ class RainforestResinStrategy(Strategy):
             return mid_price
 
     def clear_position_order(self, orders: List[Order], order_depth: OrderDepth, position: int, position_limit: int, product: str, buy_order_volume: int, sell_order_volume: int, fair_value: float, width: int) -> List[Order]:
-        
+        """
+        清仓逻辑
+        参数:
+            orders: 订单列表
+            order_depth: 订单薄
+            position: 当前持仓
+            position_limit: 持仓限制
+            product: 标的物
+            buy_order_volume: 买单总量
+            sell_order_volume: 卖单总量
+            fair_value: 公允价格
+            width: 清仓宽度
+        返回：
+            buy_order_volume: 买单总量
+            sell_order_volume: 卖单总量
+        """
         position_after_take = position + buy_order_volume - sell_order_volume
         fair = round(fair_value)
         fair_for_bid = math.floor(fair_value)
@@ -390,15 +442,19 @@ class RainforestResinStrategy(Strategy):
         return buy_order_volume, sell_order_volume
 
     def generate_orders(self, state: TradingState) -> List[Order]:
+
+        logger.print("Generating orders for Rainforest Resin")
         orders: List[Order] = []
         order_depth = state.order_depths[self.symbol]
         position = state.position.get(self.symbol, 0)
+        logger.print(f"Position: {position}")
+        logger.print(f"Order depth: {order_depth}")
 
         buy_order_volume = 0
         sell_order_volume = 0
 
         if len(order_depth.sell_orders) != 0 and len(order_depth.buy_orders) != 0:    
-
+            logger.print("Calculating fair value using mid price")
             best_ask = min(order_depth.sell_orders.keys())
             best_bid = max(order_depth.buy_orders.keys())
             filtered_ask = [price for price in order_depth.sell_orders.keys() if abs(order_depth.sell_orders[price]) >= 15]
@@ -467,13 +523,19 @@ class RainforestResinStrategy(Strategy):
             bbbf = max(bbf) if len(bbf) > 0 else fair_value - 2
            
             buy_quantity = self.position_limit - (position + buy_order_volume)
-            if buy_quantity > 0:
-                orders.append(Order("RAINFOREST_RESIN", bbbf + 1, buy_quantity))  # Buy order
 
+            if buy_quantity > 0:
+                logger.print(f"Buying {buy_quantity} contracts at {bbbf + 1}")
+                orders.append(Order("RAINFOREST_RESIN", bbbf + 1, buy_quantity))  # Buy order
+            else:
+                logger.print(f"No need to buy contracts at {bbbf + 1}")
             sell_quantity = self.position_limit + (position - sell_order_volume)
             if sell_quantity > 0:
+                logger.print(f"Selling {sell_quantity} contracts at {baaf - 1}")
                 orders.append(Order("RAINFOREST_RESIN", baaf - 1, -sell_quantity))  # Sell order
-
+            else:
+                logger.print(f"No need to sell contracts at {baaf - 1}")
+            logger.print(f"Resin Orders: {orders}")
         return orders
     
     
@@ -522,7 +584,9 @@ class Trader:
     PRODUCT_CONFIG = {
         "KELP": {
             "strategy_cls": KelpStrategy,
-            "position_limit": 50
+            "position_limit": 50,
+            "take_position1": 0,
+            "take_position2": 0
         },
         "RAINFOREST_RESIN": {
             "strategy_cls": RainforestResinStrategy,
@@ -554,12 +618,15 @@ class Trader:
         for product, strategy in self.strategies.items():
             if product in trader_data:
                 strategy.load_state(trader_data[product])
-            
+                logger.print(f"Product: {product}, state loaded")
             if product in state.order_depths:
+                logger.print(f"Product: {product}, generating orders")
                 product_orders, strategy_state = strategy.run(state)
                 orders[product] = product_orders
-                new_trader_data[product] = strategy_state
+                logger.print(f"Product: {product}, orders generated. Orders: {product_orders}")
                 
+                new_trader_data[product] = strategy_state
+
         trader_data.update(new_trader_data)
         logger.flush(state, orders, conversions, trader_data)
         
