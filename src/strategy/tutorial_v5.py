@@ -224,9 +224,7 @@ class IndicatorsCalculater:
         short_ema = self.calculate_ema(prices[-20:], 5, product)
         long_ema = self.calculate_ema(prices[-20:], 20, product)
         return short_ema - long_ema
-    
-
-    
+      
 class Strategy:
     def __init__(self, symbol: str, limit: int) -> None:
         self.symbol = symbol
@@ -286,14 +284,14 @@ class KelpStrategy(Strategy):
     
 
 class RainforestresinStrategy:
-    def __init__(self, position: float, make_width: float, take_width: float, position_limit: int, timemspan: int) -> None:
+    def __init__(self, position: float, make_width: float, take_width: float, position_limit: int, timespan: int, resin_prices: list, resin_vwap: list) -> None:
         self.position = position
         self.make_width = make_width
         self.take_width = take_width
         self.position_limit = position_limit
-        self.timemspan = timemspan
-        self.resin_prices = []
-        self.resin_vwap = []
+        self.timespan = timespan
+        self.resin_prices = resin_prices[-self.timespan:]
+        self.resin_vwap = resin_vwap[-self.timespan:]
      
     def resin_fair_value(self, order_depth: OrderDepth, method = "mid_price", min_vol = 0) -> float:
         if method == "mid_price":
@@ -426,6 +424,20 @@ class RainforestresinStrategy:
                 orders.append(Order("RAINFOREST_RESIN", baaf - 1, -sell_quantity))  # Sell order
 
         return orders
+    
+    def save(self):
+        """
+        保存策略历史信息
+        返回：
+            类型：dict
+            resin_prices: 价格列表
+            resin_vwap: 当前timestamp价格加权成交量列表
+        """
+        return_dict = {
+            "resin_price": self.resin_prices,
+            "resin_vwap": self.resin_vwap
+        }
+        return return_dict
 # 4951
 class Trader:
     # 参数配置分离（每个品种独立配置）
@@ -434,7 +446,7 @@ class Trader:
             "resin_make_width" : 3.5,
             "resin_take_width" : 1,
             "resin_position_limit" : 50,
-            "resin_timemspan" :10,
+            "resin_timespan" :10,
         },
         "KELP": {
             "max_position": 50,  # 最大持仓
@@ -479,11 +491,15 @@ class Trader:
         result = {}
         conversions = 10
         old_trader_data = json.loads(state.traderData) if state.traderData != "" and state.traderData != {} else {}
+        logger.print(f"old_trader_data: {old_trader_data}")
+        
         new_trader_data = {}
 
         for product in ["RAINFOREST_RESIN", "KELP"]:
             # 从old_trader_data中获取参数
-            old_params = old_trader_data[product] 
+            if product in old_trader_data:
+                old_product_data = old_trader_data[product] 
+                logger.print(f"old_product_data: {old_product_data}")
 
             # 把old_params输入到calculator中计算indicators
 
@@ -495,7 +511,7 @@ class Trader:
                 result[product] = []
                 continue
 
-
+            '''
             if product in self.strategy_router:
                 strategy = self.strategy_router[product]
                 result[product] = strategy(
@@ -504,28 +520,59 @@ class Trader:
                     state.position.get(product, 0),
                     product,
                 )
-
+            '''
+            if product == "KELP":
+                strategy = self.strategy_router[product]
+                result[product] = strategy(
+                    state,
+                    order_depth,
+                    state.position.get(product, 0),
+                    product,
+                )
+            if product == "RAINFOREST_RESIN":
+                strategy = self.strategy_router[product]
+                result[product], new_trader_data[product] = strategy(
+                    state,
+                    order_depth,
+                    state.position.get(product, 0),
+                    product,
+                    )
+                logger.print(f"new_trader_data: {new_trader_data}")
             #保存参数到new_trader_data
-            new_trader_data[product] = str(product)
+            #new_trader_data[product] = str(product)
         
         trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
 
-    def rainforestresin_strategy(self, state: TradingState, order_depth: OrderDepth, current_pos: int, product: str) -> List[Order]:
+    def rainforestresin_strategy(self, state: TradingState, order_depth: OrderDepth, current_pos: int, product: str, historical_data: dict = {}) -> List[Order]:
         #获取config
         config = self.PRODUCT_CONFIG[product]
         resin_make_width = config["resin_make_width"]
         resin_take_width = config["resin_take_width"]
         resin_position_limit = config["resin_position_limit"]
-        resin_timemspan = config["resin_timemspan"]
+        resin_timespan = config["resin_timespan"]
+
+        #获取历史数据
+        if historical_data:
+            resin_prices = historical_data['resin_price']
+            resin_vwap = historical_data['resin_vwap']
+        else:
+            resin_prices = []
+            resin_vwap = []
 
         resin_position = state.position["RAINFOREST_RESIN"] if "RAINFOREST_RESIN" in state.position else 0
-        rainforestresin_strategy = RainforestresinStrategy(resin_position, resin_make_width, resin_take_width, resin_position_limit, resin_timemspan)
+        rainforestresin_strategy = RainforestresinStrategy(resin_position, resin_make_width, resin_take_width, resin_position_limit, resin_timespan, resin_prices, resin_vwap)
 
-        resin_orders = rainforestresin_strategy.resin_orders(order_depth, resin_timemspan, resin_make_width, resin_take_width, resin_position, resin_position_limit)
-        
-        return resin_orders
+        resin_orders = rainforestresin_strategy.resin_orders(order_depth, resin_timespan, resin_make_width, resin_take_width, resin_position, resin_position_limit)
+
+        #get historical info
+        result_dict = rainforestresin_strategy.save()
+        resin_prices = result_dict["resin_price"]
+        resin_vwap = result_dict["resin_vwap"]
+
+        logger.print(f"resin_prices: {resin_prices}, resin_vwap: {resin_vwap}")
+        return resin_orders, result_dict
     
     def kelp_strategy(self, state: TradingState, order_depth: OrderDepth, current_pos: int, product: str) -> List[Order]:
         config = self.PRODUCT_CONFIG[product]
