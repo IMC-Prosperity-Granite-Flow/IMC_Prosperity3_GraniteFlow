@@ -580,6 +580,7 @@ class Trader:
         max_pos = config["max_position"]
         take_pos1 = config["take_position1"]
         take_pos2 = config["take_position2"]
+        logger.print(f"Current position: {current_pos}, take_postion1: {take_pos1}, take_position2: {take_pos2}")
 
         true_value = self.calculate_true_value(order_depth)
         # 吃单逻辑
@@ -620,4 +621,5 @@ class Trader:
                 orders.append(Order(product, desired_bid, desired_buy))
             if desired_sell > 0:
                 orders.append(Order(product, desired_ask, -desired_sell))
+        logger.print(f"Current position: {current_pos}, take_postion1: {take_pos1}, take_position2: {take_pos2}")
         return orders
