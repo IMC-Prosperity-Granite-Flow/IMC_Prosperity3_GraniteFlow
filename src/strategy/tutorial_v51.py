@@ -274,13 +274,11 @@ class Strategy(ABC):
 
 class KelpStrategy(Strategy):
     """海带做市策略"""
-    def __init__(self, symbol: str, position_limit: int, take_position1: int, take_position2: int):
+    def __init__(self, symbol: str, position_limit: int):
         super().__init__(symbol, position_limit)
         # 添加海带策略特有参数
         self.symbol = symbol
         self.position_limit = position_limit
-        self.take_position1 = take_position1
-        self.take_position2 = take_position2
             
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         """基于订单簿前三档的加权中间价计算"""
@@ -308,7 +306,9 @@ class KelpStrategy(Strategy):
         return (buy_avg + sell_avg) / 2
     
     def generate_orders(self, state: TradingState) -> List[Order]:
-        logger.print(f"Current position: {state.position.get(self.symbol, 0)}, take_position1: {self.take_position1}, take_position2: {self.take_position2}")
+        take_position1 = 0
+        take_position2 = 0
+        logger.print(f"Current position: {state.position.get(self.symbol, 0)}, take_position1: {take_position1}, take_position2: {take_position2}")
         current_position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
         fair_value = self.calculate_fair_value(order_depth)
@@ -322,7 +322,7 @@ class KelpStrategy(Strategy):
                 buyable = min(-vol, self.position_limit - current_position)
                 if buyable > 0:
                     orders.append(Order(self.symbol, ask, buyable))
-                    self.take_position1 += buyable
+                    take_position1 += buyable
             else:
                 break  # 后续价格更高，不再处理
 
@@ -332,7 +332,7 @@ class KelpStrategy(Strategy):
                 sellable = min(vol, self.position_limit + current_position)
                 if sellable > 0:
                     orders.append(Order(self.symbol, bid, -sellable))
-                    self.take_position2 += sellable
+                    take_position2 += sellable
             else:
                 break  # 后续价格更低，不再处理
 
@@ -346,14 +346,14 @@ class KelpStrategy(Strategy):
 
             available_buy = max(0, self.position_limit - current_position)
             available_sell = max(0, self.position_limit + current_position)
-            desired_buy = available_buy - self.take_position1
-            desired_sell = available_sell - self.take_position2
+            desired_buy = available_buy - take_position1
+            desired_sell = available_sell - take_position2
 
             if desired_buy > 0:
                 orders.append(Order(self.symbol, desired_bid, desired_buy))
             if desired_sell > 0:
                 orders.append(Order(self.symbol, desired_ask, -desired_sell))
-        logger.print(f"Current position: {current_position}, take_position1: {self.take_position1}, take_position2: {self.take_position2}")
+        logger.print(f"Current position: {current_position}, take_position1: {take_position1}, take_position2: {take_position2}")
         return orders
     
     def save_state(self) -> dict:
@@ -584,9 +584,7 @@ class Trader:
     PRODUCT_CONFIG = {
         "KELP": {
             "strategy_cls": KelpStrategy,
-            "position_limit": 50,
-            "take_position1": 0,
-            "take_position2": 0
+            "position_limit": 50
         },
         "RAINFOREST_RESIN": {
             "strategy_cls": RainforestResinStrategy,
@@ -606,6 +604,7 @@ class Trader:
             cls = config["strategy_cls"]
             args = {k:v for k,v in config.items() if k != "strategy_cls"}
             self.strategies[product] = cls(symbol=product, **args)
+            logger.print(f"Loading strategy for {product}, args: {args}")
 
     def run(self, state: TradingState):
         conversions = 0
@@ -628,6 +627,7 @@ class Trader:
                 new_trader_data[product] = strategy_state
 
         trader_data.update(new_trader_data)
+        trader_data = json.dumps(trader_data)
         logger.flush(state, orders, conversions, trader_data)
         
-        return orders, conversions, json.dumps(trader_data)
+        return orders, conversions, trader_data
