@@ -1,11 +1,12 @@
+from abc import abstractmethod
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import List, Any, Dict, List
-
+from typing import List, Any, Dict, List, TypeAlias
 import numpy as np
 import json
 import jsonpickle
 import math 
-
+from collections import deque
+JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
 class Logger:
     def __init__(self) -> None:
@@ -121,8 +122,168 @@ class Logger:
         return value[: max_length - 3] + "..."
 logger = Logger()
         
+class IndicatorsCalculater:
+    def __init__(self, state: TradingState, orders: dict[Symbol, list[Order]], conversions: int, trader_data: json, product) -> None:
+        self.state = state
+        self.orders = orders
+        self.conversions = conversions
+        self.trader_data = trader_data
+        self.product = product
+        
+    def fractional_derivative(ts, alpha, n_terms=10):
+        """
+        计算时间序列 ts 的分数阶导数
+        参数:
+            ts: 时间序列 
+            alpha: 阶数
+            n_terms: 历史项的数量，控制内存长短
+        
+        返回:
+            分数阶导数序列（长度与 ts 相同，前面一些值为 nan）
+        """
+        def binomial_coeff(a, k):
+            return math.gamma(a + 1) / (math.gamma(k + 1) * math.gamma(a - k + 1))
 
-# 4951
+        ts = np.asarray(ts)
+        result = np.full_like(ts, np.nan, dtype=np.float64)
+        
+        for t in range(n_terms, len(ts)):
+            val = 0.0
+            for k in range(n_terms):
+                coeff = (-1)**k * binomial_coeff(alpha, k)
+                val += coeff * ts[t - k]
+            result[t] = val
+        return result
+
+    def calculate_market_volatility(self, state: TradingState, product: str) -> float:
+        """计算市场的波动率"""
+        # 取最近的交易数据
+        recent_trades = state.market_trades.get(product, [])
+        if len(recent_trades) > 1:
+            prices = [trade.price for trade in recent_trades]
+            return np.std(prices)  # 返回价格标准差作为波动性
+        return 0  # 如果交易数据不足，则返回0
+
+    def calculate_volatility(self, prices) -> float:
+        """计算价格序列的波动率"""
+        if len(prices) > 1:
+            return np.std(prices)  # 返回价格标准差作为波动性
+        return 0  # 如果价格序列不足，则返回0
+    
+
+    def calculate_ma(self, prices: List[float], span: int):
+        """
+        计算移动平均线（MA)
+        prices: 价格序列
+        span: 移动平均线的长度
+        """
+        if not prices:
+            return 0.0
+        if span > len(prices):
+            logger.print(f'Error: span {span} is larger than the length of prices {len(prices)}')
+            return 0.0
+        return sum(prices[-span:]) / span
+    
+    def calculate_ema(self, prices: List[float], span: int) -> float:
+        """ 
+        计算指数移动平均 (EMA) 
+        prices: 价格序列
+        span: 移动平均线的长度
+        """
+        if not prices:
+            return 0.0
+        alpha = 2 / (span + 1)  # EMA 平滑因子
+        ema = prices[0]  # 初始化为第一天的价格
+        for price in prices[1:]:
+            ema = alpha * price + (1 - alpha) * ema
+        return ema
+
+    def orderbook_imbalance(self, state, product: str, fair_price: float) -> float:
+        """ 计算订单簿不平衡度 """  
+        order_depth: OrderDepth = state.order_depths[product]
+        
+        buy_orders = [(price, amount) for price, amount in order_depth.buy_orders.items()]
+        sell_orders = [(price, amount) for price, amount in order_depth.sell_orders.items()]
+        
+        # 根据价格离公平价的远近加权
+        buy_pressure = sum(amount * np.exp(-(fair_price - price)) for price, amount in buy_orders if price != 0)
+        sell_pressure = sum(amount * np.exp(-(price - fair_price)) for price, amount in sell_orders if price != 0)
+
+        total_pressure = buy_pressure + sell_pressure
+        if total_pressure == 0:
+            return 0
+        return (buy_pressure - sell_pressure) / total_pressure
+    
+
+    def price_momentum(self, prices: List[int], product: str) -> float:
+        '''计算价格动量'''
+        if len(prices) < 20:
+            logger.print(f'Error: length of prices {len(prices)} is less than 20')
+            return 0.0
+        # 计算短期均线和长期均线
+        short_ema = self.calculate_ema(prices[-20:], 5, product)
+        long_ema = self.calculate_ema(prices[-20:], 20, product)
+        return short_ema - long_ema
+    
+
+    
+class Strategy:
+    def __init__(self, symbol: str, limit: int) -> None:
+        self.symbol = symbol
+        self.limit = limit
+
+    @abstractmethod
+    def act(self, state: TradingState) -> None:
+        raise NotImplementedError()
+
+    def run(self, state: TradingState) -> list[Order]:
+        self.orders = []
+        self.act(state)
+        return self.orders
+
+    def buy(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, quantity))
+
+    def sell(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, -quantity))
+
+    def save(self) -> JSON:
+        return None
+
+    def load(self, data: JSON) -> None:
+        pass
+
+class KelpStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int) -> None:
+        self.symbol = symbol
+        self.limit = limit
+        
+    def get_true_value(self, state: TradingState, symbol: str) -> int:
+
+        """基于订单簿前三档的加权中间价计算真实价值"""
+        def weighted_avg(prices_vols, n=3):
+            total_volume = 0
+            price_sum = 0
+            # 按价格排序（买单调降序，卖单调升序）
+            sorted_orders = sorted(prices_vols.items(),
+                                   key=lambda x: x[0],
+                                   reverse=isinstance(prices_vols, dict))
+
+            # 取前n档或全部可用档位
+            for price, vol in sorted_orders[:n]:
+                abs_vol = abs(vol)
+                price_sum += price * abs_vol
+                total_volume += abs_vol
+            return price_sum / total_volume if total_volume > 0 else 0
+        
+        order_depth = state.order_depths[symbol]
+        # 计算买卖方加权均价
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+
+        # 返回中间价
+        return (buy_avg + sell_avg) / 2
+    
 
 class RainforestresinStrategy:
     def __init__(self, position: float, make_width: float, take_width: float, position_limit: int, timemspan: int) -> None:
@@ -265,7 +426,7 @@ class RainforestresinStrategy:
                 orders.append(Order("RAINFOREST_RESIN", baaf - 1, -sell_quantity))  # Sell order
 
         return orders
-
+# 4951
 class Trader:
     # 参数配置分离（每个品种独立配置）
     PRODUCT_CONFIG = {
@@ -277,8 +438,8 @@ class Trader:
         },
         "KELP": {
             "max_position": 50,  # 最大持仓
-            "eat_position1":0,
-            "eat_position2":0,   # 固定的吃单的仓位（初始值）
+            "take_position1":0,
+            "take_position2":0,   # 固定的吃单的仓位（初始值）
         }
     }
 
@@ -317,13 +478,20 @@ class Trader:
     def run(self, state: TradingState) -> tuple[Dict[str, List[Order]], int, str]:
         result = {}
         conversions = 10
-        trader_data = "SAMPLE"
+        old_trader_data = json.loads(state.traderData) if state.traderData != "" and state.traderData != {} else {}
+        new_trader_data = {}
 
         for product in ["RAINFOREST_RESIN", "KELP"]:
+            # 从old_trader_data中获取参数
+            old_params = old_trader_data[product] 
+
+            # 把old_params输入到calculator中计算indicators
+
+            # 预测
 
             # 策略调用
-            od = state.order_depths.get(product, None)
-            if not od or not od.buy_orders or not od.sell_orders:
+            order_depth = state.order_depths.get(product, None)
+            if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
                 result[product] = []
                 continue
 
@@ -332,10 +500,15 @@ class Trader:
                 strategy = self.strategy_router[product]
                 result[product] = strategy(
                     state,
-                    od,
+                    order_depth,
                     state.position.get(product, 0),
                     product,
                 )
+
+            #保存参数到new_trader_data
+            new_trader_data[product] = str(product)
+        
+        trader_data = json.dumps(new_trader_data, separators=(",", ":"))
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
 
@@ -358,8 +531,8 @@ class Trader:
         config = self.PRODUCT_CONFIG[product]
         orders = []
         max_pos = config["max_position"]
-        eat_pos1 = config["eat_position1"]
-        eat_pos2 = config["eat_position2"]
+        take_pos1 = config["take_position1"]
+        take_pos2 = config["take_position2"]
 
         true_value = self.calculate_true_value(order_depth)
         # 吃单逻辑
@@ -369,7 +542,7 @@ class Trader:
                 buyable = min(-vol, max_pos - current_pos)
                 if buyable > 0:
                     orders.append(Order(product, ask, buyable))
-                    eat_pos1 += buyable
+                    take_pos1 += buyable
             else:
                 break  # 后续价格更高，不再处理
 
@@ -379,7 +552,7 @@ class Trader:
                 sellable = min(vol, max_pos + current_pos)
                 if sellable > 0:
                     orders.append(Order(product, bid, -sellable))
-                    eat_pos2 += sellable
+                    take_pos2 += sellable
             else:
                 break  # 后续价格更低，不再处理
 
@@ -393,8 +566,8 @@ class Trader:
 
             available_buy = max(0, max_pos - current_pos)
             available_sell = max(0, max_pos + current_pos)
-            desired_buy = available_buy - eat_pos1
-            desired_sell = available_sell - eat_pos2
+            desired_buy = available_buy - take_pos1
+            desired_sell = available_sell - take_pos2
 
             if desired_buy > 0:
                 orders.append(Order(product, desired_bid, desired_buy))
