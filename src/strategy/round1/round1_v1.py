@@ -654,7 +654,7 @@ class Trader:
         "KELP": {
             "strategy_cls": KelpStrategy,
             "position_limit": 50,
-            "alpha": 0
+            "alpha": 0,
             "beta": 0
         },
         "RAINFOREST_RESIN": {
