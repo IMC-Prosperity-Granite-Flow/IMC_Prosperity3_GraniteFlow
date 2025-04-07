@@ -246,6 +246,8 @@ class Strategy(ABC):
         self.position_limit = position_limit
         self.orders: List[Order] = []
 
+        self.trader_data = {}
+
     @abstractmethod
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         """计算标的物公允价格"""
@@ -263,21 +265,22 @@ class Strategy(ABC):
         order_depth = state.order_depths.get(self.symbol, OrderDepth())
         if not order_depth.buy_orders and not order_depth.sell_orders:
             return [], {}
-
+         
         # 生成订单
         self.orders = self.generate_orders(state)
-
-        # 保存策略状态
-        strategy_state = self.save_state()
+        
+        # 保存策略状态，用于下次加载（包括仓位、因子等历史信息）
+        strategy_state = self.save_state(state)
+        logger.print("Saving State", strategy_state)
 
         return self.orders, strategy_state
-
-    def save_state(self) -> dict:
+    
+    def save_state(self, state) -> dict:
         """保存策略状态"""
         return {}
-
     def load_state(self, data: dict):
         """加载策略状态"""
+        self.trader_data = data
         pass
 
 
@@ -290,6 +293,10 @@ class KelpStrategy(Strategy):
         self.symbol = symbol
         self.position_limit = position_limit
 
+        self.trader_data = {}
+        self.position_history = []
+
+            
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         """基于订单簿前三档的加权中间价计算"""
 
@@ -371,13 +378,22 @@ class KelpStrategy(Strategy):
         logger.print(
             f"Current position: {current_position}, take_position1: {take_position1}, take_position2: {take_position2}")
         return orders
-
-    def save_state(self) -> dict:
-        return {}
-
+    
+    def save_state(self, state) -> dict:
+        return_dict = {}
+        position = state.position.get(self.symbol)
+        if self.position_history:
+            return_dict['position'] = self.position_history
+        else:
+            return_dict['position'] = []
+        return_dict['position'].append(position)
+        return return_dict
+    
     def load_state(self, data: dict):
-        pass
-
+        #data为历史数据，类型为字典
+        self.trader_data = data
+        self.position_history = self.trader_data.get('position', {})
+        return self.position_history
 
 class RainforestResinStrategy(Strategy):
     """树脂动态做市策略"""
@@ -585,8 +601,8 @@ class RainforestResinStrategy(Strategy):
             "vwap": vwap,
             "volume": total_volume
         })
-
-    def save_state(self) -> dict:
+    
+    def save_state(self, state) -> dict:
         return {
             # 使用统一命名字段
             "price_series": list(self.price_history),
@@ -633,7 +649,6 @@ class Trader:
             cls = config["strategy_cls"]
             args = {k: v for k, v in config.items() if k != "strategy_cls"}
             self.strategies[product] = cls(symbol=product, **args)
-            logger.print(f"Loading strategy for {product}, args: {args}")
 
     def run(self, state: TradingState):
         conversions = 0
@@ -646,17 +661,15 @@ class Trader:
         for product, strategy in self.strategies.items():
             if product in trader_data:
                 strategy.load_state(trader_data[product])
-                logger.print(f"Product: {product}, state loaded")
             if product in state.order_depths:
-                logger.print(f"Product: {product}, generating orders")
                 product_orders, strategy_state = strategy.run(state)
                 orders[product] = product_orders
-                logger.print(f"Product: {product}, orders generated. Orders: {product_orders}")
-
+                
                 new_trader_data[product] = strategy_state
 
         trader_data.update(new_trader_data)
         trader_data = json.dumps(trader_data)
+        logger.print("Current trader_data", trader_data)
         logger.flush(state, orders, conversions, trader_data)
 
         return orders, conversions, trader_data
