@@ -487,64 +487,6 @@ class Trader:
         # 返回中间价
         return (buy_avg + sell_avg) / 2
 
-    def run(self, state: TradingState) -> tuple[Dict[str, List[Order]], int, str]:
-        result = {}
-        conversions = 10
-        old_trader_data = json.loads(state.traderData) if state.traderData != "" and state.traderData != {} else {}
-        logger.print(f"old_trader_data: {old_trader_data}")
-        
-        new_trader_data = {}
-
-        for product in ["RAINFOREST_RESIN", "KELP"]:
-            # 从old_trader_data中获取参数
-            if product in old_trader_data:
-                old_product_data = old_trader_data[product] 
-                logger.print(f"old_product_data: {old_product_data}")
-
-            # 把old_params输入到calculator中计算indicators
-
-            # 预测
-
-            # 策略调用
-            order_depth = state.order_depths.get(product, None)
-            if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
-                result[product] = []
-                continue
-
-            '''
-            if product in self.strategy_router:
-                strategy = self.strategy_router[product]
-                result[product] = strategy(
-                    state,
-                    order_depth,
-                    state.position.get(product, 0),
-                    product,
-                )
-            '''
-            if product == "KELP":
-                strategy = self.strategy_router[product]
-                result[product] = strategy(
-                    state,
-                    order_depth,
-                    state.position.get(product, 0),
-                    product,
-                )
-            if product == "RAINFOREST_RESIN":
-                strategy = self.strategy_router[product]
-                result[product], new_trader_data[product] = strategy(
-                    state,
-                    order_depth,
-                    state.position.get(product, 0),
-                    product,
-                    )
-                logger.print(f"new_trader_data: {new_trader_data}")
-            #保存参数到new_trader_data
-            #new_trader_data[product] = str(product)
-        
-        trader_data = json.dumps(new_trader_data, separators=(",", ":"))
-        logger.flush(state, result, conversions, trader_data)
-        return result, conversions, trader_data
-
     def rainforestresin_strategy(self, state: TradingState, order_depth: OrderDepth, current_pos: int, product: str, historical_data: dict = {}) -> List[Order]:
         #获取config
         config = self.PRODUCT_CONFIG[product]
@@ -623,3 +565,61 @@ class Trader:
                 orders.append(Order(product, desired_ask, -desired_sell))
         logger.print(f"Current position: {current_pos}, take_postion1: {take_pos1}, take_position2: {take_pos2}")
         return orders
+    
+    def run(self, state: TradingState) -> tuple[Dict[str, List[Order]], int, str]:
+        result = {}
+        conversions = 10
+        old_trader_data = json.loads(state.traderData) if state.traderData != "" and state.traderData != {} else {}
+        logger.print(f"old_trader_data: {old_trader_data}")
+        
+        new_trader_data = {}
+
+        for product in ["RAINFOREST_RESIN", "KELP"]:
+            # 从old_trader_data中获取参数
+            if product in old_trader_data:
+                old_product_data = old_trader_data[product] 
+                logger.print(f"old_product_data: {old_product_data}")
+
+            # 把old_params输入到calculator中计算indicators
+
+            # 预测
+
+            # 策略调用
+            order_depth = state.order_depths.get(product, None)
+            if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
+                result[product] = []
+                continue
+
+            '''
+            if product in self.strategy_router:
+                strategy = self.strategy_router[product]
+                result[product] = strategy(
+                    state,
+                    order_depth,
+                    state.position.get(product, 0),
+                    product,
+                )
+            '''
+            if product == "KELP":
+                strategy = self.strategy_router[product]
+                result[product] = strategy(
+                    state,
+                    order_depth,
+                    state.position.get(product, 0),
+                    product,
+                )
+            if product == "RAINFOREST_RESIN":
+                strategy = self.strategy_router[product]
+                result[product], new_trader_data[product] = strategy(
+                    state,
+                    order_depth,
+                    state.position.get(product, 0),
+                    product,
+                    )
+                logger.print(f"new_trader_data: {new_trader_data}")
+            #保存参数到new_trader_data
+            #new_trader_data[product] = str(product)
+        
+        trader_data = json.dumps(new_trader_data, separators=(",", ":"))
+        logger.flush(state, result, conversions, trader_data)
+        return result, conversions, trader_data
