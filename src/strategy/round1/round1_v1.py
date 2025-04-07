@@ -244,7 +244,6 @@ class Strategy(ABC):
     def __init__(self, symbol: str, position_limit: int):
         self.symbol = symbol
         self.position_limit = position_limit
-        self.orders: List[Order] = []
 
         self.trader_data = {}
 
@@ -287,12 +286,11 @@ class Strategy(ABC):
 class KelpStrategy(Strategy):
     """海带做市策略"""
 
-    def __init__(self, symbol: str, position_limit: int):
+    def __init__(self, symbol: str, position_limit: int, alpha: float, beta):
         super().__init__(symbol, position_limit)
         # 添加海带策略特有参数
-        self.symbol = symbol
-        self.position_limit = position_limit
-
+        self.alpha = alpha #adjusted fair price清仓系数
+        self.alpha = beta #adjusted fair price订单簿不平衡度系数
         self.trader_data = {}
         self.position_history = []
 
@@ -330,6 +328,10 @@ class KelpStrategy(Strategy):
         current_position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
         fair_value = self.calculate_fair_value(order_depth)
+
+        #调整公允价格
+        adjusted_fair_value = fair_value + self.alpha * current_position
+
         available_buy = max(0, self.position_limit - current_position)
         available_sell = max(0, self.position_limit + current_position)
 
@@ -626,10 +628,11 @@ class RainforestResinStrategy(Strategy):
 class SquidInkStrategy(Strategy):
     """SQUIDINK策略"""
     def __init__(self, symbol: str, position_limit: int, timewindow: int = 10):
-        self.symbol = symbol
-        self.position_limit = position_limit
+        super().__init__(symbol, position_limit)
+
         self.timewindow = timewindow
-        self.hDeque[float] = deque(maxlen=timewindow)
+        #历史数据（如果需要使用的话）
+        self.history = Deque[float] = deque(maxlen=timewindow)
     
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         return 0
@@ -650,7 +653,9 @@ class Trader:
     PRODUCT_CONFIG = {
         "KELP": {
             "strategy_cls": KelpStrategy,
-            "position_limit": 50
+            "position_limit": 50,
+            "alpha": 0
+            "beta": 0
         },
         "RAINFOREST_RESIN": {
             "strategy_cls": RainforestResinStrategy,
