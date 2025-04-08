@@ -127,14 +127,9 @@ class Logger:
 logger = Logger()
 
 
-class IndicatorsCalculater:
-    def __init__(self, state: TradingState, orders: dict[Symbol, list[Order]], conversions: int, trader_data: json,
-                 product) -> None:
-        self.state = state
-        self.orders = orders
-        self.conversions = conversions
-        self.trader_data = trader_data
-        self.product = product
+class FactorsCalculator:
+    def __init__(self) -> None:
+        pass
 
     def fractional_derivative(ts, alpha, n_terms=10):
         """
@@ -286,8 +281,17 @@ class KelpStrategy(Strategy):
         self.alpha = beta #adjusted fair price订单簿不平衡度系数
         self.time_window = time_window #价格序列长度
         self.position_history = deque(maxlen = self.time_window)
+
+        #初始化因子计算器
+        self.calculator = FactorsCalculator()
         self.trader_data = {}
-        
+    
+
+    def calculate_moving_average(self, span: int):
+        """计算移动平均线"""
+        ma = self.calculator.calculate_ma(self.price_history, span)
+        return ma
+    
     def calculate_mid_price(self, state: TradingState):
         """计算中间价"""
         order_depth = state.order_depths[self.symbol]
