@@ -673,9 +673,12 @@ class Trader:
         "KELP": {
             "strategy_cls": KelpStrategy,
             "position_limit": 50,
+<<<<<<< HEAD
+            "alpha": -0.1,
+=======
             "alpha": 0,
-            "beta": 0, 
-            "time_window": 50
+>>>>>>> 0d43548f560cfe784d552efc5eb6a128e6fa37a1
+            "beta": 0
         },
         "RAINFOREST_RESIN": {
             "strategy_cls": RainforestResinStrategy,
