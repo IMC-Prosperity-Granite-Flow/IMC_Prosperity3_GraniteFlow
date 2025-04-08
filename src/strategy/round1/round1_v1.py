@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import List, Any, Dict, List, Tuple, TypeAlias
+from typing import List, Any, Dict, List, Tuple, TypeAlias, Deque
 import numpy as np
 import json
 import jsonpickle
@@ -231,20 +231,13 @@ class IndicatorsCalculater:
         return short_ema - long_ema
 
 
-from abc import ABC, abstractmethod
-from datamodel import Order, OrderDepth, TradingState
-from typing import Dict, List, Deque, Tuple
-import json
-from collections import deque
-
-
 class Strategy(ABC):
     """策略抽象基类"""
 
     def __init__(self, symbol: str, position_limit: int):
         self.symbol = symbol
         self.position_limit = position_limit
-
+        self.price_history = deque(maxlen=100)
         self.trader_data = {}
 
     @abstractmethod
@@ -286,14 +279,26 @@ class Strategy(ABC):
 class KelpStrategy(Strategy):
     """海带做市策略"""
 
-    def __init__(self, symbol: str, position_limit: int, alpha: float, beta):
+    def __init__(self, symbol: str, position_limit: int, alpha: float, beta: float, time_window: int):
         super().__init__(symbol, position_limit)
         # 添加海带策略特有参数
         self.alpha = alpha #adjusted fair price清仓系数
         self.alpha = beta #adjusted fair price订单簿不平衡度系数
+        self.time_window = time_window #价格序列长度
+        self.position_history = deque(maxlen = self.time_window)
         self.trader_data = {}
-        self.position_history = []
-
+        
+    def calculate_mid_price(self, state: TradingState):
+        """计算中间价"""
+        order_depth = state.order_depths[self.symbol]
+        buy_prices = list(order_depth.buy_orders.keys())
+        sell_prices = list(order_depth.sell_orders.keys())
+        best_ask = min(sell_prices) if sell_prices else 0
+        best_bid = max(buy_prices) if buy_prices else 0
+        logger.print(f"Best ask {best_ask}, Best bid {best_bid}")
+        mid_price = (best_ask + best_bid) / 2
+        logger.print(f"Mid price {mid_price}")
+        return mid_price
             
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         """基于订单簿前三档的加权中间价计算"""
@@ -389,12 +394,22 @@ class KelpStrategy(Strategy):
         else:
             return_dict['position'] = []
         return_dict['position'].append(position)
+
+        #保存mid_price
+        mid_price = self.calculate_mid_price(state)
+        logger.print(f"Calculated mid price: {mid_price}")
+        self.price_history.append(mid_price)
+        #维护长度
+        if len(self.price_history) > self.time_window: 
+                self.price_history.popleft()
+        logger.print(f"Saving, Price history: {self.price_history}")
         return return_dict
     
     def load_state(self, data: dict):
         #data为历史数据，类型为字典
         self.trader_data = data
         self.position_history = self.trader_data.get('position', {})
+        logger.print(f"Loading, Price history: {self.price_history}")
         return self.position_history
 
 class RainforestResinStrategy(Strategy):
@@ -654,12 +669,9 @@ class Trader:
         "KELP": {
             "strategy_cls": KelpStrategy,
             "position_limit": 50,
-<<<<<<< HEAD
-            "alpha": -0.1,
-=======
             "alpha": 0,
->>>>>>> 0d43548f560cfe784d552efc5eb6a128e6fa37a1
-            "beta": 0
+            "beta": 0, 
+            "time_window": 50
         },
         "RAINFOREST_RESIN": {
             "strategy_cls": RainforestResinStrategy,
