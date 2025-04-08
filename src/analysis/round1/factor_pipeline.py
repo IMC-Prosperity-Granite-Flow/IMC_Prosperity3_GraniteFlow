@@ -60,26 +60,29 @@ class FactorPipeline:
         """
         make prediction 
         """
-        print("Running prediction...")
+        feature_cols = self.feature_cols.copy()
         df = df.copy()
         print("Preprocessing data...")
         df = self.orderbook_preprocess(df)
         print("Generating features...")
         df = self.generate_features(df)
-        print("Adding fractional features...")
-        df = self.add_fractional_features(df, self.feature_cols)
 
-        # 更新feature_cols包含新添加的分数阶特征
-        new_frac_cols = [col for col in self.df.columns if '_fracdiff_' in col]
-        self.feature_cols.extend(new_frac_cols)
+        # 🚫 避免对已经是 fracdiff 的特征重复处理
+        base_feature_cols = [col for col in feature_cols if 'fracdiff' not in col]
+        print("Adding fractional features...")
+        df = self.add_fractional_features(df, base_feature_cols)
+
+        # 更新 feature_cols：基础 + 新生成的 fracdiff 特征
+        new_frac_cols = [col for col in df.columns if '_fracdiff_' in col]
+        feature_cols = base_feature_cols + new_frac_cols
 
         print("Cleaning and standardizing features...")
-        df , _ = self.clean_and_standardize(df, self.feature_cols)
+        df , _ = self.clean_and_standardize(df, feature_cols)
         print("Generating label...")
         df = self.generate_label(df, self.horizon)
 
         # 使用PCA转换新数据
-        new_X_pca = self.pca.transform(df)
+        new_X_pca = self.pca.transform(df[feature_cols])
 
         # 预测
         predictions = trained_model.predict(new_X_pca)
@@ -150,6 +153,15 @@ class FactorPipeline:
         df['alpha3'] = df['spread'] * df['depth_ratio']
         df['alpha4'] = df['vwap'] - df['mid_price']
         df['alpha5'] = df['relative_spread'] * df['return_vol_ratio']
+        return df
+    
+    @staticmethod
+    def add_fractional_features(df, base_cols, orders=[0.5, 1.0], window=5):
+        df = df.copy()
+        for col in base_cols:
+            for order in orders:
+                name = f"{col}_fracdiff_{order}"
+                df[name] = FactorPipeline.fractional_derivative(df[col].astype(np.float64).fillna(0), order, window)
         return df
 
     #@staticmethod
@@ -236,15 +248,6 @@ class FactorPipeline:
             result[i] = np.dot(weights, series[i-window:i][::-1])
         result[:window] = np.nan
         return result
-
-    @staticmethod
-    def add_fractional_features(df, base_cols, orders=[0.5, 1.0], window=5):
-        df = df.copy()
-        for col in base_cols:
-            for order in orders:
-                name = f"{col}_fracdiff_{order}"
-                df[name] = FactorPipeline.fractional_derivative(df[col].astype(np.float64).fillna(0), order, window)
-        return df
     
     @staticmethod
     def auto_tune_model(X, y):
