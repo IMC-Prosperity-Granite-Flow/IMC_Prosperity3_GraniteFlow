@@ -285,32 +285,8 @@ class KelpStrategy(Strategy):
         self.trader_data = {}
         self.position_history = []
 
+
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """基于订单簿前三档的加权中间价计算"""
-
-        def weighted_avg(prices_vols, n=3):
-            total_volume = 0
-            price_sum = 0
-            # 按价格排序（买单调降序，卖单调升序）
-            sorted_orders = sorted(prices_vols.items(),
-                                   key=lambda x: x[0],
-                                   reverse=isinstance(prices_vols, dict))
-
-            # 取前n档或全部可用档位
-            for price, vol in sorted_orders[:n]:
-                abs_vol = abs(vol)
-                price_sum += price * abs_vol
-                total_volume += abs_vol
-            return price_sum / total_volume if total_volume > 0 else 0
-
-        # 计算买卖方加权均价
-        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
-        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
-
-        # 返回中间价
-        return (buy_avg + sell_avg) / 2
-
-    def calculate_true_value(self, order_depth: OrderDepth) -> float:
 
         total_volume = 0
         total_value = 0.0
@@ -341,7 +317,7 @@ class KelpStrategy(Strategy):
         take_position2 = 0
         current_position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
-        fair_value = self.calculate_true_value(order_depth)
+        fair_value = self.calculate_fair_value(order_depth)
 
         available_buy = max(0, self.position_limit - current_position)
         available_sell = max(0, self.position_limit + current_position)
@@ -578,27 +554,28 @@ class SquidInkStrategy(Strategy):
         order_depth = state.order_depths[self.symbol]
         buy_orders = [(p, v) for p, v in order_depth.buy_orders.items() if v > 0]
         sell_orders = [(p, v) for p, v in order_depth.sell_orders.items() if v > 0]
-        best_bid = max(buy_orders, key=lambda x: x[0])[0]
-        best_ask = min(sell_orders, key=lambda x: x[0])[0]
-        
-        best_bid_amount = buy_orders[best_bid]
-        best_ask_amount = sell_orders[best_ask]
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+            
+        best_bid_amount = order_depth.buy_orders[best_bid]
+        best_ask_amount = order_depth.sell_orders[best_ask]
+
 
         position = state.position.get(self.symbol, 0)
         fair_value = self.calculate_fair_value(order_depth)
 
     
-        vol_10 = self.calculator.calculate_volatility(self.fair_value_history, 10)
+        vol_10 = self.calculator.calculate_volatility(list(self.fair_value_history), 10)
 
         # Strategy 1: Market making
         if self.current_mode == "market_making":
-            if abs(fair_value - self.fair_value_ma200_history[-1]) <= self.band_width:
+            if len(self.fair_value_ma200_history) < 200 or abs(fair_value - self.fair_value_ma200_history[-1]) <= self.band_width:
                 logger.print("Market making mode")
                 take_position1 = 0
                 take_position2 = 0
                 current_position = state.position.get(self.symbol, 0)
                 order_depth = state.order_depths[self.symbol]
-                fair_value = self.calculate_true_value(order_depth)
+                fair_value = self.calculate_fair_value(order_depth)
 
                 available_buy = max(0, self.position_limit - current_position)
                 available_sell = max(0, self.position_limit + current_position)
