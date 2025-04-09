@@ -24,8 +24,6 @@ feature_cols = [
     'ask_volume',
     'bid_volume',
     'ask_bid_ratio',
-    'log_return_5',
-    'log_return_1',
     'vol_10',
     'kurt_50',
     'mid_mean_20',
@@ -44,14 +42,21 @@ feature_cols = [
     'alpha5'
 ]
 
-df_kelp_train = df_kelp.iloc[:10000]
-pipeline = FactorPipeline(df_kelp_train, 10, feature_cols=feature_cols)
-pipeline_df, trained_model= pipeline.run()
+def train_and_predict(symbol:str):
+    #训练模型
+    df_train = extract_product_df(df, symbol)
+    pipeline = FactorPipeline(df_train, 10, feature_cols=feature_cols)
+    pipeline_df, trained_model= pipeline.run()
 
 
-new_data = df_kelp.iloc[10000:]
-new_df = pipeline.predict(new_data, trained_model)
+    new_data = df_train.iloc[10000:]
+    new_df = pipeline.predict(new_data, trained_model)
 
-new_df.to_csv('./src/analysis/round1/kelp_prediction.csv', index=False)
+    new_df.to_csv('./src/analysis/round1/' + symbol + '_prediction.csv', index=False)
 
 
+
+if __name__ == '__main__':
+    products = ['KELP', 'RAINFOREST_RESIN', 'SQUID_INK']
+    for product in products:
+        train_and_predict(product)

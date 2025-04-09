@@ -133,19 +133,19 @@ class FactorPipeline:
         df['ask_volume'] = df['ask_volume_1'] + df['ask_volume_2'] + df['ask_volume_3']
         df['bid_volume'] = df['bid_volume_1'] + df['bid_volume_2'] + df['bid_volume_3']
         df['ask_bid_ratio'] = (df['ask_volume'] - df['bid_volume']) / (df['ask_volume'] + df['bid_volume'])
-        df['log_return_5'] = np.log(df['mid_price']).diff(5)
-        df['log_return_1'] = np.log(df['mid_price']).diff(1)
+        df['log_return_5'] = np.log(df['mid_price']).diff(-5)
+        df['log_return_1'] = np.log(df['mid_price']).diff(-1)
         df['vol_10'] = df['mid_price'].rolling(10).std()
         df['kurt_50'] = df['log_return_5'].rolling(50).apply(lambda x: kurtosis(x, fisher=False), raw=True)
         df['mid_mean_20'] = df['mid_price'].rolling(20).mean()
         df['mid_reversion_gap'] = df['mid_price'] - df['mid_mean_20']
-        df['orderbook_imbalance'] = (df['bid_volume'] - df['ask_volume']) / (df['bid_volume'] + df['ask_volume'] + 1e-6)
-        df['depth_ratio'] = df['bid_volume_1'] / (df['bid_volume'] + 1e-6)
-        df['relative_spread'] = df['spread'] / (df['mid_price'] + 1e-6)
-        df['imbalance_diff'] = df['orderbook_imbalance'].diff()
-        df['vol_diff'] = df['vol_10'].diff()
-        df['spread_change'] = df['spread'].diff()
-        df['return_vol_ratio'] = df['log_return_1'].abs() / (df['vol_10'] + 1e-6)
+        df['orderbook_imbalance'] = (df['bid_volume'] - df['ask_volume']) / (df['bid_volume'] + df['ask_volume'] )
+        df['depth_ratio'] = df['bid_volume_1'] / (df['bid_volume'])
+        df['relative_spread'] = df['spread'] / (df['mid_price'])
+        df['imbalance_diff'] = df['orderbook_imbalance'].diff(-5)
+        df['vol_diff'] = df['vol_10'].diff(-5)
+        df['spread_change'] = df['spread'].diff(-5)
+        df['return_vol_ratio'] = df['log_return_1'].abs() / (df['vol_10'] )
 
         #人工构造alpha
         df['alpha1'] = df['log_return_1'] - df['log_return_5']
@@ -221,9 +221,22 @@ class FactorPipeline:
 
     @staticmethod
     def shap_analysis(model, X_train):
-        explainer = shap.Explainer(model)
+        import shap
+        explainer = shap.Explainer(model, X_train)
         shap_values = explainer(X_train)
-        shap.summary_plot(shap_values, X_train, plot_type='bar')
+
+        # 如果是多分类模型，shap_values.values 维度是 [n_samples, n_features, n_classes]
+        # 选取第0类作为示例进行可视化
+        if hasattr(shap_values, "values") and isinstance(shap_values.values, np.ndarray) and shap_values.values.ndim == 3:
+            shap_values_single_class = shap_values[:, :, 0]
+        else:
+            shap_values_single_class = shap_values
+
+        # 检查是否为空，避免索引错误
+        if shap_values_single_class.shape[1] == 0:
+            print("No features found in SHAP values. Skipping plot.")
+        else:
+            shap.plots.bar(shap_values_single_class, max_display=10)
 
     @staticmethod
     def cross_validation_score(model, X, y):

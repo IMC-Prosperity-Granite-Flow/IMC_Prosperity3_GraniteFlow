@@ -1,13 +1,11 @@
 from abc import ABC, abstractmethod
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import List, Any, Dict, List, Tuple, TypeAlias, Deque
+from typing import List, Any, Dict, List, Tuple, Deque
 import numpy as np
 import json
 import jsonpickle
 import math
 from collections import deque
-
-JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
 
 class Logger:
@@ -269,7 +267,6 @@ class Strategy(ABC):
         self.trader_data = data
         pass
 
-
 class KelpStrategy(Strategy):
     """海带做市策略"""
 
@@ -334,9 +331,9 @@ class KelpStrategy(Strategy):
         position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
         fair_value = self.calculate_fair_value(order_depth)
-
+        orderbook_imbalance = self.calculator.orderbook_imbalance(state, self.symbol, fair_value)
         #调整公允价格
-        adjusted_fair_value = fair_value + self.alpha * position
+        fair_value = fair_value + self.alpha * position + self.beta * orderbook_imbalance
 
         available_buy = max(0, self.position_limit - position)
         available_sell = max(0, self.position_limit + position)
@@ -604,7 +601,7 @@ class SquidInkStrategy(Strategy):
         if len(self.price_history) > history_limit:
             self.price_history = self.price_history[-history_limit:]
         
-# 计算短期和长期移动平均线
+        # 计算短期和长期移动平均线
         if len(self.price_history) >= self.trend_window:
             self.ma_short = np.mean(self.price_history[-self.trend_window:])
         else:
@@ -736,16 +733,14 @@ class SquidInkStrategy(Strategy):
     
     def load_state(self, data):
         pass
-    
-    
 
-class Trader:
-    # config
-    PRODUCT_CONFIG = {
+class Config:
+    def __init__(self):
+        self.PRODUCT_CONFIG = {
         "KELP": {
             "strategy_cls": KelpStrategy,
             "position_limit": 50,
-            "alpha": 0,
+            "alpha": -0.03,
             "beta": 0,
             "time_window": 20
         },
@@ -768,12 +763,48 @@ class Trader:
             "price_momentum_factor": 0.1 # 价格动量调整因子
         }
     }
+    
 
-    def __init__(self):
-        self.strategies = {}
-        self._init_strategies()
+class Trader:
+    # config
+    '''
+    PRODUCT_CONFIG = {
+        "KELP": {
+            "strategy_cls": KelpStrategy,
+            "position_limit": 50,
+            "alpha": -0.03,
+            "beta": 0,
+            "time_window": 20
+        },
+        "RAINFOREST_RESIN": {
+            "strategy_cls": RainforestResinStrategy,
+            "position_limit": 50,  # 最大持仓
+            "base_offset": 3,  # 基础报价偏移
+            "level2spread": 8,  # spread超过这个值就用另一个offset
+        },
+        "SQUID_INK": {
+            "strategy_cls": SquidInkStrategy,
+            "position_limit": 50,          # 最大持仓量
+            "reversal_threshold": 20,    # 考虑价格反转信号的阈值
+            "trend_window": 10,          # 趋势计算的窗口大小
+            "value_window": 50,          # 计算真实价值的窗口大小
+            "cycle_length": 200,         # 预期的价格周期长度
+            "base_spread": 2,            # 基础价差
+            "min_spread": 5,             # 最小可接受的价差
+            "position_scaling": 0.8,     # 基于持仓的调整因子
+            "price_momentum_factor": 0.1 # 价格动量调整因子
+        }
+    }
+    '''
+    class Trader:
+        def __init__(self, product_config=None):
+            # 使用默认 config，或外部传入 config
+            self.PRODUCT_CONFIG = product_config if product_config is not None else Config().PRODUCT_CONFIG
+            self.strategies = {}
+            self._init_strategies()
 
     def _init_strategies(self):
+        config = Config()
         for product, config in self.PRODUCT_CONFIG.items():
             cls = config["strategy_cls"]
             args = {k: v for k, v in config.items() if k != "strategy_cls"}
