@@ -527,6 +527,8 @@ class SquidInkStrategy(Strategy):
                 spread: float = 1.0, max_deviation: int = 200, vol_threshold: float = 10, band_width: float = 25):
         super().__init__(symbol, position_limit)
 
+        self.timestamp = 0
+
         #策略参数
         self.ma_window = ma_window
         self.spread = spread
@@ -550,6 +552,7 @@ class SquidInkStrategy(Strategy):
         return weighted_price / total_volume if total_volume else 0
 
     def generate_orders(self, state) -> List[Order]:
+        self.timestamp += 100
         orders = []
         order_depth = state.order_depths[self.symbol]
         buy_orders = [(p, v) for p, v in order_depth.buy_orders.items() if v > 0]
@@ -653,23 +656,53 @@ class SquidInkStrategy(Strategy):
                 return orders
 
             elif all(x != 0 for x in self.fair_value_ma200_history):
+                logger.print(f"Break! {fair_value}")
                 self.breakout_price = fair_value
+                #反向吃满
+                direction = 1 if fair_value - self.fair_value_ma200_history[-1] else -1 #记录突破方向
+
+                if direction == 1:
+                    #突破是向上的，先做多
+                    max_amount = min(best_ask_amount, self.position_limit - position)
+                    orders.append(Order(self.symbol, best_ask - 1, max_amount))
+                if direction == -1:
+                    #突破是向下的，先做空
+                    max_amount = min(-best_bid_amount, position - self.position_limit)
+                    orders.append(Order(self.symbol, best_bid + 1, -max_amount))
+
                 self.current_mode = "trend_following"
 
         # Strategy 2: Breakout
         elif self.current_mode == "trend_following" and self.breakout_price is not None:
             distance = fair_value - self.breakout_price
             direction = 1 if distance > 0 else -1 #往上突破为1 往下突破为0
-            target_position = -direction * self.position_limit
-            delta_position = target_position - position
 
-            if delta_position != 0:
-                amount = (self.max_deviation - abs(distance)) * direction * delta_position if abs(distance) < self.max_deviation else delta_position
-                #注意amount已经包括了direction
+            #先检查仓位有没有反向吃满，如果没有则先吃满
+            if abs(position) < self.position_limit:
+                #继续下单
                 if direction == 1:
-                    orders.append(Order(self.symbol, best_bid + 1, amount))
+                    #突破是向上的，先做多
+                    max_amount = min(best_ask_amount, self.position_limit - position)
+                    orders.append(Order(self.symbol, best_ask - 1, max_amount))
                 if direction == -1:
-                    orders.append(Order(self.symbol, best_ask - 1, amount))
+                    #突破是向下的，先做空
+                    max_amount = min(-best_bid_amount, position - self.position_limit)
+                    orders.append(Order(self.symbol, best_bid + 1, -max_amount))
+            
+            else:
+                #只有吃满了仓位才开始反转
+                target_position = -direction * self.position_limit
+                delta_position = target_position - position
+
+                current_position = state.position.get(self.symbol, 0)
+                if delta_position != 0:
+                    res_position = self.position_limit - position if direction == 1 else position + self.position_limit
+                    amount = min(abs(distance) * direction * delta_position / self.max_deviation, res_position)
+                    #注意amount已经包括了direction
+                    if direction == 1:
+                        orders.append(Order(self.symbol, best_ask - 1, amount))
+                    if direction == -1:
+                        orders.append(Order(self.symbol, best_bid + 1, amount))
                 
 
             # 回归就清仓
@@ -683,6 +716,7 @@ class SquidInkStrategy(Strategy):
                         #突破是向下的，平多
                         max_amount = min(best_ask_amount, position)
                         orders.append(Order(self.symbol, best_ask - 1, -max_amount))
+
                 if position == 0:
                     self.breakout_price = None
                     self.current_mode = "market_making"
