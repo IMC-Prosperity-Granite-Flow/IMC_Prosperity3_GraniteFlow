@@ -766,42 +766,11 @@ class Config:
     
 
 class Trader:
-    # config
-    '''
-    PRODUCT_CONFIG = {
-        "KELP": {
-            "strategy_cls": KelpStrategy,
-            "position_limit": 50,
-            "alpha": -0.03,
-            "beta": 0,
-            "time_window": 20
-        },
-        "RAINFOREST_RESIN": {
-            "strategy_cls": RainforestResinStrategy,
-            "position_limit": 50,  # 最大持仓
-            "base_offset": 3,  # 基础报价偏移
-            "level2spread": 8,  # spread超过这个值就用另一个offset
-        },
-        "SQUID_INK": {
-            "strategy_cls": SquidInkStrategy,
-            "position_limit": 50,          # 最大持仓量
-            "reversal_threshold": 20,    # 考虑价格反转信号的阈值
-            "trend_window": 10,          # 趋势计算的窗口大小
-            "value_window": 50,          # 计算真实价值的窗口大小
-            "cycle_length": 200,         # 预期的价格周期长度
-            "base_spread": 2,            # 基础价差
-            "min_spread": 5,             # 最小可接受的价差
-            "position_scaling": 0.8,     # 基于持仓的调整因子
-            "price_momentum_factor": 0.1 # 价格动量调整因子
-        }
-    }
-    '''
-    class Trader:
-        def __init__(self, product_config=None):
-            # 使用默认 config，或外部传入 config
-            self.PRODUCT_CONFIG = product_config if product_config is not None else Config().PRODUCT_CONFIG
-            self.strategies = {}
-            self._init_strategies()
+    def __init__(self, product_config=None):
+        # 使用默认 config，或外部传入 config
+        self.PRODUCT_CONFIG = product_config if product_config is not None else Config().PRODUCT_CONFIG
+        self.strategies = {}
+        self._init_strategies()
 
     def _init_strategies(self):
         config = Config()
