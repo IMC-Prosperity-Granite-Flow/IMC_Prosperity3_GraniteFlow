@@ -642,6 +642,10 @@ class SquidInkStrategy(Strategy):
         """根据估计的真实价值和当前市场状况生成最佳订单"""
         logger.print('Generating Orders for squid')
         order_depth = state.order_depths[self.symbol]
+        if order_depth.buy_orders and order_depth.sell_orders:
+            pass
+        else:
+            return []
         fair_value = self.calculate_fair_value(order_depth)
         position = state.position.get(self.symbol, 0)
         orders = []
@@ -670,14 +674,18 @@ class SquidInkStrategy(Strategy):
         # 确保我们的买入价有竞争力但不过高
         if desired_bid >= best_bid and desired_bid < fair_value:
             bid_price = best_bid + 1
+            logger.print(f"Adjusted Desired Bid: {bid_price}")
         else:
             bid_price = desired_bid
+            logger.print(f"Bid: {bid_price}")
             
         # 确保我们的卖出价有竞争力但不过低
         if desired_ask <= best_ask and desired_ask > fair_value:
             ask_price = best_ask - 1
+            logger.print(f"Adjusted Desired Ask: {ask_price}")
         else:
             ask_price = desired_ask
+            logger.print(f"Ask: {ask_price}")
         
         # 确定持仓限制和可用容量
         position_limit = self.position_limit
@@ -706,6 +714,7 @@ class SquidInkStrategy(Strategy):
                 if sell_volume > 0:
                     orders.append(Order(self.symbol, bid_price, -sell_volume))
                     available_sell -= sell_volume
+                    
         logger.print(f"Market Making, available_buy: {available_buy}, available_sell: {available_sell}")
         # 做市交易 - 在价差附近挂限价单
         if available_buy > 0:

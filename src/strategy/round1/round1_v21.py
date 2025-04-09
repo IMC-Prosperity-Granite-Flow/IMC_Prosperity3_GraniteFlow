@@ -538,6 +538,7 @@ class SquidInkStrategy(Strategy):
         self.fair_value_history = Deque(maxlen=time_window)
         self.fair_value_ma10 = Deque(maxlen=time_window)
         self.time_window = time_window
+        self.alpha = -0.03
         self.calculator = FactorsCalculator()
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
@@ -553,10 +554,36 @@ class SquidInkStrategy(Strategy):
         orders = []
         position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
+
+        buy_orders = [(price, amount) for price, amount in order_depth.buy_orders.items() if amount != 0]
+        sell_orders = [(price, amount) for price, amount in order_depth.sell_orders.items() if amount != 0]
+
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        spread = best_ask - best_bid
+
         fair_value = self.calculate_fair_value(order_depth)
         fair_value_ma10 = self.calculator.calculate_ma(self.fair_value_history, 10)
 
 
+        #清仓机制
+        adjusted_fair_value = fair_value + self.alpha * position
+
+        #吃单
+        if best_ask < adjusted_fair_value:
+            # 计算最大可买量
+            buyable = min(-order_depth.sell_orders[best_ask], self.position_limit - position)
+            if buyable > 0:
+                orders.append(Order(self.symbol, best_ask, buyable))
+                position += buyable
+        
+        if best_bid > adjusted_fair_value:
+            # 计算最大可卖量
+            sellable = min(order_depth.buy_orders[best_bid], self.position_limit + position)
+            if sellable > 0:
+                orders.append(Order(self.symbol, best_bid, -sellable))
+                position -= sellable
+        
 
         #均值回归策略
         if fair_value > fair_value_ma10:
@@ -564,17 +591,15 @@ class SquidInkStrategy(Strategy):
             desired_buy = max(0, self.position_limit - position)
             if desired_buy > 0:
                 orders.append(Order(self.symbol, fair_value, desired_buy))
+                position += desired_buy
         else:
             # 卖出
             desired_sell = max(0, position)
             if desired_sell > 0:
                 orders.append(Order(self.symbol, fair_value, -desired_sell))
+                position -= desired_sell
         
-        
-        
-        
-        #均值回归交易
-
+        #做市？
 
         return orders
 
