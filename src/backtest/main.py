@@ -1,4 +1,4 @@
-from Backtester import Backtester
+from backtester import Backtester
 from src.strategy.round1.round1_v2 import Trader
 if __name__ == '__main__':
     backtester = Backtester(Trader)
