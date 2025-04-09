@@ -226,6 +226,10 @@ class FactorsCalculator:
         short_ema = self.calculate_ema(prices[-20:], 5, product)
         long_ema = self.calculate_ema(prices[-20:], 20, product)
         return short_ema - long_ema
+    
+    def get_mid_reversion_gap(self, mid_prices: list, mid_prices_20: list):
+        '''计算mid price回归距离'''
+        return mid_prices[-1] - mid_prices_20[-1]
 
 
 class Strategy(ABC):
@@ -265,9 +269,8 @@ class Strategy(ABC):
     def save_state(self, state) -> dict:
         """保存策略状态"""
         return {}
-    def load_state(self, data: dict):
+    def load_state(self, state: TradingState):
         """加载策略状态"""
-        self.trader_data = data
         pass
 
 class KelpStrategy(Strategy):
@@ -402,11 +405,8 @@ class KelpStrategy(Strategy):
                 self.price_history.popleft()
         return return_dict
     
-    def load_state(self, data: dict):
-        #data为历史数据，类型为字典
-        self.trader_data = data
-        self.position_history = self.trader_data.get('position', {})
-        return self.position_history
+    def load_state(self, state):
+        pass
 
 class RainforestResinStrategy(Strategy):
     """树脂动态做市策略"""
@@ -526,19 +526,32 @@ class RainforestResinStrategy(Strategy):
     def save_state(self, state) -> dict:
         return {}
 
-    def load_state(self, data: dict):
+    def load_state(self, state):
         pass
 
 class SquidInkStrategy(Strategy):
     """SQUIDINK策略"""
-    def __init__(self, symbol: str, position_limit: int, time_window: int, alpha: float, deviation_threshold: float):
+    def __init__(self, symbol: str, position_limit: int, time_window: int, alpha: float, deviation_threshold: float, predict_length: int):
         super().__init__(symbol, position_limit)
-        self.fair_value_history = Deque(maxlen=time_window)
-        self.fair_value_ma10 = Deque(maxlen=time_window)
+
         self.time_window = time_window
         self.alpha = -0.03
         self.deviation_threshold = deviation_threshold
+        self.predict_length = predict_length
+
+        self.fair_value_history = Deque(maxlen=time_window)
+        self.mid_price_history = Deque(maxlen=time_window)
+        self.fair_value_ma10 = Deque(maxlen=time_window)
+        self.fair_value_ma20 = Deque(maxlen=time_window)
+        self.mid_price_history_ma20 = Deque(maxlen=time_window)
+        self.mid_reversion_gap = Deque(maxlen=time_window)
+        self.log_return5 = Deque(maxlen=time_window)
         self.calculator = FactorsCalculator()
+
+    def calculate_mid_price(self, order_depth: OrderDepth) -> float:
+        bid1_price = max(order_depth.buy_orders.keys())
+        ask1_price = min(order_depth.sell_orders.keys())
+        return (bid1_price + ask1_price) / 2
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         """基于订单簿前三档的加权中间价计算"""
@@ -575,7 +588,41 @@ class SquidInkStrategy(Strategy):
         #清仓机制
         adjusted_fair_value = fair_value + self.alpha * position
 
+
+
         logger.print("Taking")
+        if len(self.log_return5) == self.time_window and all (x != 0 for x in list(self.log_return5)):
+            #如果连续预测收益为正，买入
+            if all(x > 0 for x in list(self.log_return5)[-self.predict_length:]):
+                max_return_long = 0.052
+                logger.print("All log returns are positive, taking position")
+                mean_return = np.mean(list(self.log_return5)[-self.predict_length:])
+                max_buy_amount = max(0, self.position_limit - position)
+                return_ratio = mean_return / max_return_long
+                if return_ratio > 0.05:
+                    buy_amount = max_buy_amount
+                    if buy_amount > 0:
+                        logger.print(f"Buying at {best_ask - 1}, amount: {buy_amount}")
+                        orders.append(Order(self.symbol, best_ask - 1, buy_amount))
+                    position += buy_amount
+            #如果连续预测收益为负数，卖出
+            if all(x < 0 for x in list(self.log_return5)[-self.predict_length:]):
+                max_return_short = -0.055
+                logger.print("All log returns are negative, taking position")
+                mean_return = np.mean(list(self.log_return5)[-self.predict_length:])
+                return_ratio = mean_return / max_return_short
+                if return_ratio > 0.05:
+                    max_sell_amount = max(0, position + self.position_limit)
+                    sell_amount = max_sell_amount
+                    if sell_amount > 0:
+                        logger.print(f"Selling at {best_bid + 1}, amount: {sell_amount}")
+                        orders.append(Order(self.symbol, best_bid + 1, -sell_amount))
+                        position -= sell_amount
+        
+            
+
+
+        '''
         logger.print(f"Position: {position}")
         if position > - self.position_limit:
             logger.print(f"Position limit: {self.position_limit}")
@@ -583,8 +630,19 @@ class SquidInkStrategy(Strategy):
             logger.print(f"Available sell: {available_sell}")
             orders.append(Order(self.symbol, best_bid + 1, -available_sell))
 
+        '''
 
+        '''
         fair_value_deviation = fair_value - fair_value_ma10
+
+        if fair_value_deviation > self.deviation_threshold:
+            logger.print(f"Fair value deviation: {fair_value_deviation} larger than threshold: {self.deviation_threshold}")
+            available_sell = max(0, position + self.position_limit)
+            if available_sell > 0:
+                sell_amount = min(available_sell, best_bid_amount)
+                logger.print(f"Available sell: {available_sell}, sell at {best_bid + 1}, amount: {sell_amount}")
+                orders.append(Order(self.symbol, best_bid + 1, -sell_amount))
+        
         if fair_value_deviation < - self.deviation_threshold:
             logger.print(f"Fair value deviation: {fair_value_deviation} larger than threshold: {self.deviation_threshold}")
             available_buy = max(0, self.position_limit - position)
@@ -592,6 +650,7 @@ class SquidInkStrategy(Strategy):
                 buy_amount = min(available_buy, best_ask_amount)
                 logger.print(f"Available buy: {available_buy}, buy at {best_ask - 1}, amount: {buy_amount}")
                 orders.append(Order(self.symbol, best_ask - 1, buy_amount))
+        '''
         '''
         #吃单
         if best_ask < adjusted_fair_value:
@@ -638,25 +697,64 @@ class SquidInkStrategy(Strategy):
         #做市
         '''
 
-
-
         return orders
 
     def save_state(self, state):
+        return {}
+    
+    
+    def load_state(self, state):
+
         #保存fair_value
         self.fair_value_history.append(self.calculate_fair_value(state.order_depths[self.symbol]))
         if len(self.fair_value_history) > self.time_window:
             self.fair_value_history.popleft()
-        logger.print(self.fair_value_history)
+        #logger.print("fair value history: ", self.fair_value_history)
         #保存ma10
         self.fair_value_ma10.append(self.calculator.calculate_ma(list(self.fair_value_history), 10))
         if len(self.fair_value_ma10) > self.time_window:
             self.fair_value_ma10.popleft()
-        logger.print(self.fair_value_ma10)
-        return {}
-    
-    def load_state(self, data):
+        #logger.print("fair value ma10: ", self.fair_value_ma10)
+        #保存ma20
+        self.fair_value_ma20.append(self.calculator.calculate_ma(list(self.fair_value_history), 20))
+        if len(self.fair_value_ma20) > self.time_window:
+            self.fair_value_ma20.popleft()
+        #logger.print("fair value ma20: ", self.fair_value_ma20)
+
+        #保存mid_price
+        mid_price = self.calculate_mid_price(state.order_depths[self.symbol])
+        self.mid_price_history.append(mid_price)
+        if len(self.mid_price_history) > self.time_window:
+            self.mid_price_history.popleft()
+        #logger.print("mid price history: ", self.mid_price_history)
+        #保存mid_price_ma20
+        mid_price_history_ma20 = self.calculator.calculate_ma(list(self.mid_price_history), 20)
+        self.mid_price_history_ma20.append(mid_price_history_ma20)
+        if len(self.mid_price_history_ma20) > self.time_window:
+            self.mid_price_history_ma20.popleft()
+        #logger.print("mid price history ma20: ", self.mid_price_history_ma20)
+        #保存mid_reversion_gap
+        mid_reversion_gap = self.calculator.get_mid_reversion_gap(self.mid_price_history, self.mid_price_history_ma20)
+        self.mid_reversion_gap.append(mid_reversion_gap)
+        if len(self.mid_reversion_gap) > self.time_window:
+            self.mid_reversion_gap.popleft()
+        #logger.print("mid reversion gap: ", self.mid_reversion_gap)
+
+        #保存预测的log_return5
+        a = 3.777e-6
+        b = 0.0003
+        if all(x != 0 for x in self.mid_price_history and self.mid_price_history_ma20):
+            log_return5 = a + b * mid_reversion_gap
+        else:
+            log_return5 = 0
+        self.log_return5.append(log_return5)
+        if len(self.log_return5) > self.time_window:
+            self.log_return5.popleft()
+        logger.print("log return5: ", self.log_return5)
+
         pass
+
+
 class Config:
     def __init__(self):
         self.PRODUCT_CONFIG = {
@@ -678,7 +776,8 @@ class Config:
             "position_limit": 50,          # 最大持仓量
             "time_window": 20,             # 计算均价的时长
             "alpha": -0.03,                # 公允价格偏移
-            "deviation_threshold": 10    # 偏离均值回归的阈值
+            "deviation_threshold": 15,   # 偏离均值回归的阈值
+            "predict_length": 5           #预测时使用历史数据窗口长度
         }
     }
     
@@ -707,7 +806,7 @@ class Trader:
 
         for product, strategy in self.strategies.items():
             if product in trader_data:
-                strategy.load_state(trader_data[product])
+                strategy.load_state(state)
             if product in state.order_depths:
                 product_orders, strategy_state = strategy.run(state)
                 orders[product] = product_orders
