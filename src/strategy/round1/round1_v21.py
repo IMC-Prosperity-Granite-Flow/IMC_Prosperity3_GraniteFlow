@@ -694,8 +694,9 @@ class SquidInkStrategy(Strategy):
                 orders.append(Order(self.symbol, best_ask + 1, desired_buy))
                 position += desired_buy
         
-        #做市
+        
         '''
+        #做市
 
         return orders
 
