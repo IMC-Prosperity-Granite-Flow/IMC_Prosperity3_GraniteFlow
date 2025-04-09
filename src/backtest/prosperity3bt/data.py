@@ -7,6 +7,7 @@ from prosperity3bt.file_reader import FileReader
 LIMITS = {
     "RAINFOREST_RESIN": 50,
     "KELP": 50,
+    "SQUID_INK": 50,
 }
 
 
