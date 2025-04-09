@@ -533,207 +533,64 @@ class RainforestResinStrategy(Strategy):
 
 class SquidInkStrategy(Strategy):
     """SQUIDINK策略"""
-    def __init__(self, symbol: str, position_limit: int, reversal_threshold: int, trend_window: int, value_window: int,
-                 cycle_length: int, base_spread: int, min_spread: int, position_scaling: float, price_momentum_factor: float):
+    def __init__(self, symbol: str, position_limit: int, time_window: int):
         super().__init__(symbol, position_limit)
+        self.fair_value_history = Deque(maxlen=time_window)
+        self.fair_value_ma10 = Deque(maxlen=time_window)
+        self.time_window = time_window
+        self.calculator = FactorsCalculator()
 
-        #策略参数
-        self.reversal_threshold = reversal_threshold
-        self.trend_window = trend_window
-        self.value_window = value_window
-        self.cycle_length = cycle_length
-        self.base_spread = base_spread
-        self.min_spread = min_spread
-        self.position_scaling = position_scaling
-        self.price_momentum_factor = price_momentum_factor
-
-        #历史数据
-        self.price_history = []
-        self.price_predictions = []
-        self.ma_short = []
-        self.ma_long = []
-        self.last_fair_value = []
-        self.current_phase = []  # 1表示上升趋势，-1表示下降趋势
-        self.phase_changes = []  # 跟踪相位变化
-        self.last_crossover = []  # 均线最后一次交叉的时间点
-        self.cycle_position = []  # 在价格周期中的位置
-    
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """基于订单簿和历史数据计算估计的真实价值"""
-        
-        # 使用交易量加权方式整合订单簿两侧的数据
-        total_volume = 0
-        total_value = 0.0
+        """基于订单簿前三档的加权中间价计算"""
 
-        # 处理买单（按价格从高到低排序）
-        for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
-            abs_volume = abs(volume)
-            total_value += price * abs_volume
-            total_volume += abs_volume
-
-        # 处理卖单（按价格从低到高排序）
-        for price, volume in sorted(order_depth.sell_orders.items()):
-            abs_volume = abs(volume)
-            total_value += price * abs_volume
-            total_volume += abs_volume
-
-        if total_volume > 0:
-            current_value = total_value / total_volume
-        else:
-            # 备选方案：使用中间价
-            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else 0
-            current_value = (best_bid + best_ask) / 2 if best_bid and best_ask else 1970  # 使用平均价格作为默认值
-
-        # 更新历史数据
-        
-        self.price_history = []
-        self.last_fair_value = current_value
-        self.current_phase = 0
-        self.phase_changes = []
-        self.cycle_position  = 0
-        
-        # 将当前值添加到历史记录中
-        self.price_history.append(current_value)
-        
-        # 只保留最近的历史数据
-        history_limit = max(self.trend_window * 2, self.value_window)
-        if len(self.price_history) > history_limit:
-            self.price_history = self.price_history[-history_limit:]
-        
-        # 计算短期和长期移动平均线
-        if len(self.price_history) >= self.trend_window:
-            self.ma_short = np.mean(self.price_history[-self.trend_window:])
-        else:
-            self.ma_short = current_value
-            
-        if len(self.price_history) >= self.value_window:
-            self.ma_long = np.mean(self.price_history[-self.value_window:])
-        else:
-            self.ma_long = current_value
-        
-        # 检测趋势阶段
-        prev_phase = self.current_phase
-        if self.ma_short > self.ma_long:
-            self.current_phase = 1  # 上升趋势
-        elif self.ma_short < self.ma_long:
-            self.current_phase = -1  # 下降趋势
-        
-        # 跟踪相位变化
-        if prev_phase != self.current_phase and prev_phase != 0:
-            self.phase_changes.append(len(self.price_history))
-            
-            # 在相位变化时重置周期位置
-            self.cycle_position = 0
-        else:
-            self.cycle_position += 1
-        
-        # 计算加权真实价值，整合趋势和周期信息
-        trend_factor = 1.0
-        if len(self.phase_changes) >= 2:
-            # 根据典型周期长度进行调整
-            avg_cycle = np.mean(np.diff(self.phase_changes))
-            cycle_progress = self.cycle_position / self.cycle_length
-            
-            # 当接近典型周期长度时预测反转
-            if self.current_phase == 1 and cycle_progress > 0.7:
-                trend_factor = max(0.8, 1.5 - cycle_progress)
-            elif self.current_phase == -1 and cycle_progress > 0.7:
-                trend_factor = min(1.2, 0.5 + cycle_progress)
-        
-        # 结合短期和长期移动平均线与近期动量
-        momentum = 0
-        if len(self.price_history) >= 3:
-            # 最近价格变动方向和强度
-            recent_change = self.price_history[-1] - self.price_history[-3]
-            momentum = recent_change * self.price_momentum_factor
-        
-        # 计算最终真实价值
-        fair_value = (
-            self.ma_short * 0.4 + 
-            self.ma_long * 0.6 + 
-            momentum
-        ) * trend_factor
-        
-        # 保存以供下次迭代使用
-        self.last_fair_value = fair_value
-        
+        sell_orders = [(price, amount) for price, amount in order_depth.sell_orders.items() if amount != 0]
+        buy_orders = [(price, amount) for price, amount in order_depth.buy_orders.items() if amount != 0]
+        #计算加权均价
+        fair_value = sum(price * amount for price, amount in sell_orders + buy_orders) / sum(amount for price, amount in sell_orders + buy_orders)
         return fair_value
-
-    def generate_orders(self, state: TradingState) -> List[Order]:
-        """根据估计的真实价值和当前市场状况生成最佳订单"""
+    
+    def generate_orders(self, state):
+        orders = []
+        position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
         fair_value = self.calculate_fair_value(order_depth)
-        position = state.position.get(self.symbol, 0)
-        orders = []
-        
-        # 查找当前最佳买入价/卖出价
-        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
-        
-        # 计算市场中间价和价差
-        midpoint = (best_bid + best_ask) / 2 if best_bid and best_ask else fair_value
-        spread = best_ask - best_bid if best_bid and best_ask else self.min_spread * 2
-        
-        # 根据真实价值和价差确定期望的买入/卖出价
-        desired_spread = max(self.min_spread, self.base_spread + abs(position) * self.position_scaling)
-        
-        # 基于持仓的调整（逆向持仓倾向）
-        position_adjustment = -position * self.position_scaling
-        
-        # 根据真实价值、价差和持仓调整买入/卖出价
-        desired_bid = int(fair_value + position_adjustment - desired_spread / 2)
-        desired_ask = int(fair_value + position_adjustment + desired_spread / 2)
-        
-        # 确保我们的买入价有竞争力但不过高
-        if desired_bid >= best_bid and desired_bid < fair_value:
-            bid_price = best_bid + 1
+        fair_value_ma10 = self.calculator.calculate_ma(self.fair_value_history, 10)
+
+
+
+        #均值回归策略
+        if fair_value > fair_value_ma10:
+            # 买入
+            desired_buy = max(0, self.position_limit - position)
+            if desired_buy > 0:
+                orders.append(Order(self.symbol, fair_value, desired_buy))
         else:
-            bid_price = desired_bid
-            
-        # 确保我们的卖出价有竞争力但不过低
-        if desired_ask <= best_ask and desired_ask > fair_value:
-            ask_price = best_ask - 1
-        else:
-            ask_price = desired_ask
+            # 卖出
+            desired_sell = max(0, position)
+            if desired_sell > 0:
+                orders.append(Order(self.symbol, fair_value, -desired_sell))
         
-        # 确定持仓限制和可用容量
-        position_limit = self.position_limit
-        available_buy = max(0, position_limit - position)
-        available_sell = max(0, position_limit + position)
         
-        # 机会主义交易 - 积极吃单获取有利价格
-        for ask_price, volume in sorted(order_depth.sell_orders.items()):
-            # 如果卖价明显低于真实价值，则买入
-            if ask_price < fair_value - self.min_spread:
-                buy_volume = min(abs(volume), available_buy)
-                if buy_volume > 0:
-                    orders.append(Order(self.symbol, ask_price, buy_volume))
-                    available_buy -= buy_volume
         
-        for bid_price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
-            # 如果买价明显高于真实价值，则卖出
-            if bid_price > fair_value + self.min_spread:
-                sell_volume = min(volume, available_sell)
-                if sell_volume > 0:
-                    orders.append(Order(self.symbol, bid_price, -sell_volume))
-                    available_sell -= sell_volume
         
-        # 做市交易 - 在价差附近挂限价单
-        if available_buy > 0:
-            orders.append(Order(self.symbol, bid_price, available_buy))
-            
-        if available_sell > 0:
-            orders.append(Order(self.symbol, ask_price, -available_sell))
-        
+        #均值回归交易
+
+
         return orders
 
     def save_state(self, state):
+        #保存fair_value
+        self.fair_value_history.append(self.calculate_fair_value(state.order_depths[self.symbol]))
+        if len(self.fair_value_history) > self.time_window:
+            self.fair_value_history.popleft()
+        #保存ma10
+        self.fair_value_ma10.append(self.calculator.calculate_ma(self.fair_value_history, 10))
+        if len(self.fair_value_ma10) > self.time_window:
+            self.fair_value_ma10.popleft()
         return {}
     
     def load_state(self, data):
         pass
-
 class Config:
     def __init__(self):
         self.PRODUCT_CONFIG = {
@@ -753,14 +610,7 @@ class Config:
         "SQUID_INK": {
             "strategy_cls": SquidInkStrategy,
             "position_limit": 50,          # 最大持仓量
-            "reversal_threshold": 20,    # 考虑价格反转信号的阈值
-            "trend_window": 10,          # 趋势计算的窗口大小
-            "value_window": 50,          # 计算真实价值的窗口大小
-            "cycle_length": 200,         # 预期的价格周期长度
-            "base_spread": 2,            # 基础价差
-            "min_spread": 5,             # 最小可接受的价差
-            "position_scaling": 0.8,     # 基于持仓的调整因子
-            "price_momentum_factor": 0.1 # 价格动量调整因子
+            "time_window": 20,             # 计算均价的时长
         }
     }
     

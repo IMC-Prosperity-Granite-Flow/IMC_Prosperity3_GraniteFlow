@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import List, Any, Dict, List, Tuple, Deque
+from typing import List, Any, Dict, List, Optional, Tuple, Deque
 import numpy as np
 import json
 import jsonpickle
@@ -255,7 +255,6 @@ class Strategy(ABC):
         
         # 保存策略状态，用于下次加载（包括仓位、因子等历史信息）
         strategy_state = self.save_state(state)
-        logger.print("Saving State", strategy_state)
 
         return self.orders, strategy_state
     
@@ -295,9 +294,7 @@ class KelpStrategy(Strategy):
         sell_prices = list(order_depth.sell_orders.keys())
         best_ask = min(sell_prices) if sell_prices else 0
         best_bid = max(buy_prices) if buy_prices else 0
-        logger.print(f"Best ask {best_ask}, Best bid {best_bid}")
         mid_price = (best_ask + best_bid) / 2
-        logger.print(f"Mid price {mid_price}")
         return mid_price
             
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
@@ -380,34 +377,21 @@ class KelpStrategy(Strategy):
             orders.append(Order(self.symbol, desired_bid, desired_buy))
         if desired_sell > 0:
             orders.append(Order(self.symbol, desired_ask, -desired_sell))
-        logger.print(
-            f"Current position: {position}, take_position1: {take_position1}, take_position2: {take_position2}")
         return orders
     
     def save_state(self, state) -> dict:
-        return_dict = {}
-        position = state.position.get(self.symbol)
-        if self.position_history:
-            return_dict['position'] = self.position_history
-        else:
-            return_dict['position'] = []
-        return_dict['position'].append(position)
-
         #保存mid_price
         mid_price = self.calculate_mid_price(state)
-        logger.print(f"Calculated mid price: {mid_price}")
         self.price_history.append(mid_price)
         #维护长度
         if len(self.price_history) > self.time_window: 
                 self.price_history.popleft()
-        logger.print(f"Saving, Price history: {self.price_history}")
-        return return_dict
+        return {}
     
     def load_state(self, data: dict):
         #data为历史数据，类型为字典
         self.trader_data = data
         self.position_history = self.trader_data.get('position', {})
-        logger.print(f"Loading, Price history: {self.price_history}")
         return self.position_history
 
 class RainforestResinStrategy(Strategy):
@@ -531,6 +515,8 @@ class RainforestResinStrategy(Strategy):
     def load_state(self, data: dict):
         pass
 
+
+
 class SquidInkStrategy(Strategy):
     """SQUIDINK策略"""
     def __init__(self, symbol: str, position_limit: int, reversal_threshold: int, trend_window: int, value_window: int,
@@ -550,13 +536,13 @@ class SquidInkStrategy(Strategy):
         #历史数据
         self.price_history = []
         self.price_predictions = []
-        self.ma_short = []
-        self.ma_long = []
-        self.last_fair_value = []
-        self.current_phase = []  # 1表示上升趋势，-1表示下降趋势
+        self.ma_short = 0
+        self.ma_long = 0
+        self.last_fair_value = 0
+        self.current_phase = 0  # 1表示上升趋势，-1表示下降趋势
         self.phase_changes = []  # 跟踪相位变化
         self.last_crossover = []  # 均线最后一次交叉的时间点
-        self.cycle_position = []  # 在价格周期中的位置
+        self.cycle_position = 0   # 在价格周期中的位置
     
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         """基于订单簿和历史数据计算估计的真实价值"""
@@ -584,14 +570,6 @@ class SquidInkStrategy(Strategy):
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
             best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else 0
             current_value = (best_bid + best_ask) / 2 if best_bid and best_ask else 1970  # 使用平均价格作为默认值
-
-        # 更新历史数据
-        
-        self.price_history = []
-        self.last_fair_value = current_value
-        self.current_phase = 0
-        self.phase_changes = []
-        self.cycle_position  = 0
         
         # 将当前值添加到历史记录中
         self.price_history.append(current_value)
@@ -662,29 +640,33 @@ class SquidInkStrategy(Strategy):
 
     def generate_orders(self, state: TradingState) -> List[Order]:
         """根据估计的真实价值和当前市场状况生成最佳订单"""
+        logger.print('Generating Orders for squid')
         order_depth = state.order_depths[self.symbol]
         fair_value = self.calculate_fair_value(order_depth)
         position = state.position.get(self.symbol, 0)
         orders = []
+        logger.print(f"Fair Value: {fair_value}")
+        logger.print(f"Position: {position}")
+
         
         # 查找当前最佳买入价/卖出价
         best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
         best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
-        
+        logger.print(f"Best Bid: {best_bid}, Best Ask: {best_ask}")
         # 计算市场中间价和价差
         midpoint = (best_bid + best_ask) / 2 if best_bid and best_ask else fair_value
         spread = best_ask - best_bid if best_bid and best_ask else self.min_spread * 2
         
         # 根据真实价值和价差确定期望的买入/卖出价
         desired_spread = max(self.min_spread, self.base_spread + abs(position) * self.position_scaling)
-        
+        logger.print(f"Desired Spread: {desired_spread}")
         # 基于持仓的调整（逆向持仓倾向）
         position_adjustment = -position * self.position_scaling
-        
+        logger.print(f"position_adjustment: {position_adjustment}")
         # 根据真实价值、价差和持仓调整买入/卖出价
         desired_bid = int(fair_value + position_adjustment - desired_spread / 2)
         desired_ask = int(fair_value + position_adjustment + desired_spread / 2)
-        
+        logger.print(f"Desired Bid: {desired_bid}, Desired Ask: {desired_ask}")
         # 确保我们的买入价有竞争力但不过高
         if desired_bid >= best_bid and desired_bid < fair_value:
             bid_price = best_bid + 1
@@ -701,31 +683,38 @@ class SquidInkStrategy(Strategy):
         position_limit = self.position_limit
         available_buy = max(0, position_limit - position)
         available_sell = max(0, position_limit + position)
+        logger.print(f"Position Limit: {position_limit}, Available Buy: {available_buy}, Available Sell: {available_sell}")
         
+        logger.print("Taking")
         # 机会主义交易 - 积极吃单获取有利价格
         for ask_price, volume in sorted(order_depth.sell_orders.items()):
+            logger.print(f"Ask: {ask_price}, Volume: {volume}")
             # 如果卖价明显低于真实价值，则买入
             if ask_price < fair_value - self.min_spread:
                 buy_volume = min(abs(volume), available_buy)
+                logger.print(f"ask price is low, buying {buy_volume}")
                 if buy_volume > 0:
                     orders.append(Order(self.symbol, ask_price, buy_volume))
                     available_buy -= buy_volume
         
         for bid_price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
+            logger.print(f"Bid: {bid_price}, Volume: {volume}")
             # 如果买价明显高于真实价值，则卖出
             if bid_price > fair_value + self.min_spread:
+                logger.print(f"bid price is high, selling {volume}")
                 sell_volume = min(volume, available_sell)
                 if sell_volume > 0:
                     orders.append(Order(self.symbol, bid_price, -sell_volume))
                     available_sell -= sell_volume
-        
+        logger.print(f"Market Making, available_buy: {available_buy}, available_sell: {available_sell}")
         # 做市交易 - 在价差附近挂限价单
         if available_buy > 0:
             orders.append(Order(self.symbol, bid_price, available_buy))
             
         if available_sell > 0:
             orders.append(Order(self.symbol, ask_price, -available_sell))
-        
+
+        logger.print(f"Squid Ink Orders: {orders}")
         return orders
 
     def save_state(self, state):
@@ -734,6 +723,7 @@ class SquidInkStrategy(Strategy):
     def load_state(self, data):
         pass
 
+    
 class Config:
     def __init__(self):
         self.PRODUCT_CONFIG = {
@@ -775,6 +765,7 @@ class Trader:
     def _init_strategies(self):
         config = Config()
         for product, config in self.PRODUCT_CONFIG.items():
+            logger.print(f"Init strategy for {product}")
             cls = config["strategy_cls"]
             args = {k: v for k, v in config.items() if k != "strategy_cls"}
             self.strategies[product] = cls(symbol=product, **args)
@@ -798,7 +789,6 @@ class Trader:
 
         trader_data.update(new_trader_data)
         trader_data = json.dumps(trader_data)
-        logger.print("Current trader_data", trader_data)
         logger.flush(state, orders, conversions, trader_data)
 
         return orders, conversions, trader_data
