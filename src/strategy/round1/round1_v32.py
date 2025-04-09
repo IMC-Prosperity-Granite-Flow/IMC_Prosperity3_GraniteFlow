@@ -548,30 +548,23 @@ class RainforestResinStrategy(Strategy):
 
 class SquidInkStrategy(Strategy):
     def __init__(self, symbol: str, position_limit: int, ma_window: int = 200,
-                 vol_window: int = 100, spread: float = 1.0, std_threshold: float = 1.0):
+                spread: float = 1.0, max_deviation: int = 200, vol_threshold: float = 10, band_width: float = 25):
         super().__init__(symbol, position_limit)
 
         #策略参数
         self.ma_window = ma_window
-        self.vol_window = vol_window
         self.spread = spread
-        self.std_threshold = std_threshold
+        self.max_deviation = max_deviation
+        self.vol_threshold = vol_threshold
+        self.band_width = band_width
 
         #策略历史数据
-        self.fair_value_history = deque(maxlen=max(ma_window, vol_window))
+        self.fair_value_history = deque(maxlen=ma_window)
+        self.fair_value_ma200_history = deque(maxlen=ma_window)
         self.current_mode = "market_making"
         self.breakout_price: Optional[float] = None
-        self.position = 0
 
-    def compute_ma(self):
-        return sum(self.fair_value_history) / len(self.fair_value_history) if self.fair_value_history else 2000
-
-    def compute_vol(self):
-        if len(self.fair_value_history) < 2:
-            return 0
-        mean = self.compute_ma()
-        var = sum((x - mean) ** 2 for x in self.fair_value_history) / len(self.fair_value_history)
-        return var ** 0.5
+        self.calculator = FactorsCalculator()
 
     def calculate_fair_value(self, order_depth) -> float:
         buy_orders = [(p, v) for p, v in order_depth.buy_orders.items() if v > 0]
@@ -583,53 +576,139 @@ class SquidInkStrategy(Strategy):
     def generate_orders(self, state) -> List[Order]:
         orders = []
         order_depth = state.order_depths[self.symbol]
+        buy_orders = [(p, v) for p, v in order_depth.buy_orders.items() if v > 0]
+        sell_orders = [(p, v) for p, v in order_depth.sell_orders.items() if v > 0]
+        best_bid = max(buy_orders, key=lambda x: x[0])[0]
+        best_ask = min(sell_orders, key=lambda x: x[0])[0]
+        
+        best_bid_amount = buy_orders[best_bid]
+        best_ask_amount = sell_orders[best_ask]
+
         position = state.position.get(self.symbol, 0)
         fair_value = self.calculate_fair_value(order_depth)
 
-        ma = self.compute_ma()
-        vol = self.compute_vol()
+    
+        vol_10 = self.calculator.calculate_volatility(self.fair_value_history, 10)
 
         # Strategy 1: Market making
         if self.current_mode == "market_making":
-            if abs(fair_value - ma) <= self.std_threshold * vol:
-                bid_price = fair_value - self.spread / 2
-                ask_price = fair_value + self.spread / 2
-                volume = min(5, self.position_limit)
+            if abs(fair_value - self.fair_value_ma200_history[-1]) <= self.band_width:
+                logger.print("Market making mode")
+                take_position1 = 0
+                take_position2 = 0
+                current_position = state.position.get(self.symbol, 0)
+                order_depth = state.order_depths[self.symbol]
+                fair_value = self.calculate_true_value(order_depth)
 
-                if position < self.position_limit:
-                    orders.append(Order(self.symbol, bid_price, volume))
-                if position > -self.position_limit:
-                    orders.append(Order(self.symbol, ask_price, -volume))
+                available_buy = max(0, self.position_limit - current_position)
+                available_sell = max(0, self.position_limit + current_position)
 
-                #仓位回归0
-                if abs(position) > 0:
-                    hedge_price = int(fair_value)
-                    hedge_volume = -position
-                    orders.append(Order(self.symbol, hedge_price, hedge_volume))
-            else:
+                orders = []
+
+                # 吃单逻辑
+                for ask, vol in sorted(order_depth.sell_orders.items()):
+                    if ask < fair_value:
+                        # 计算最大可买量
+                        buyable = min(-vol, self.position_limit - current_position)
+                        if buyable > 0:
+                            orders.append(Order(self.symbol, ask, buyable))
+                            take_position1 += buyable
+                    else:
+                        break  # 后续价格更高，不再处理
+
+                for bid, vol in sorted(order_depth.buy_orders.items(), reverse=True):
+                    if bid > fair_value:
+                        # 计算最大可卖量
+                        sellable = min(vol, self.position_limit + current_position)
+                        if sellable > 0:
+                            orders.append(Order(self.symbol, bid, -sellable))
+                            take_position2 += sellable
+                    else:
+                        break  # 后续价格更低，不再处理
+
+                # 挂单逻辑
+                best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+                best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else 0
+
+                # 根据订单簿深度调整挂单策略
+                bid_volume = sum(abs(v) for v in order_depth.buy_orders.values())
+                ask_volume = sum(abs(v) for v in order_depth.sell_orders.values())
+                total_volume = bid_volume + ask_volume
+                volume_imbalance = (bid_volume - ask_volume) / total_volume if total_volume > 0 else 0
+                
+                imbalance_factor = 1  # 可以调试这个参数
+                fair_value += imbalance_factor * volume_imbalance
+
+                # 考虑订单簿不平衡度来调整挂单价格
+                bid_adjust = max(0, round(volume_imbalance * 2))  # 买盘压力大时降低买价
+                ask_adjust = max(0, round(-volume_imbalance * 2))  # 卖盘压力大时提高卖价
+
+                desired_bid = best_bid + 1 - bid_adjust
+                if desired_bid >= fair_value:
+                    desired_bid = math.floor(fair_value)
+
+                desired_ask = best_ask - 1 + ask_adjust
+                if desired_ask <= fair_value:
+                    desired_ask = math.ceil(fair_value)
+
+                # 根据持仓和订单簿力量调整价格
+                if current_position > 25 and volume_imbalance < 0:
+                    # 持仓多且卖方力量大，更积极卖出
+                    desired_ask -= 1  # 再降1个tick
+                    if desired_ask <= fair_value:
+                        desired_ask = math.ceil(fair_value)  # 保持最低价格保护
+
+                if current_position < -25 and volume_imbalance > 0:
+                    # 持仓空且买方力量大，更积极买入
+                    desired_bid += 1  # 再提高1个tick
+                    if desired_bid >= fair_value:
+                        desired_bid = math.floor(fair_value)  # 保持最高价格保护
+
+                # 根据持仓和方向调整挂单量
+                desired_buy = min(15, available_buy - take_position1)
+                desired_sell = min(15, available_sell - take_position2)
+
+                if desired_buy > 0:
+                    orders.append(Order(self.symbol, desired_bid, desired_buy))
+                if desired_sell > 0:
+                    orders.append(Order(self.symbol, desired_ask, -desired_sell))
+                    
+                return orders
+
+            elif all(x != 0 for x in self.fair_value_ma200_history):
                 self.breakout_price = fair_value
                 self.current_mode = "trend_following"
 
         # Strategy 2: Breakout
         elif self.current_mode == "trend_following" and self.breakout_price is not None:
             distance = fair_value - self.breakout_price
-            std_distance = vol if vol > 0 else 1
-            direction = 1 if distance > 0 else -1
-            strength = min(abs(distance / std_distance), 1.0)
-
-            max_volume = int(strength * self.position_limit)
-            target_position = -direction * max_volume
+            direction = 1 if distance > 0 else -1 #往上突破为1 往下突破为0
+            target_position = -direction * self.position_limit
             delta_position = target_position - position
 
             if delta_position != 0:
-                orders.append(Order(self.symbol, int(fair_value), delta_position))
+                amount = (self.max_deviation - abs(distance)) * direction * delta_position if abs(distance) < self.max_deviation else delta_position
+                #注意amount已经包括了direction
+                if direction == 1:
+                    orders.append(Order(self.symbol, best_bid + 1, amount))
+                if direction == -1:
+                    orders.append(Order(self.symbol, best_ask - 1, amount))
+                
 
             # 回归就清仓
-            if abs(fair_value - self.breakout_price) < 0.2 * vol:
+            if fair_value - self.breakout_price < direction * vol_10:
                 if position != 0:
-                    orders.append(Order(self.symbol, int(fair_value), -position))
-                self.breakout_price = None
-                self.current_mode = "market_making"
+                    if direction == 1:
+                        #突破是向上的，平空
+                        max_amount = min(best_bid_amount, -position)
+                        orders.append(Order(self.symbol, best_bid + 1, max_amount))
+                    if direction == -1:
+                        #突破是向下的，平多
+                        max_amount = min(best_ask_amount, position)
+                        orders.append(Order(self.symbol, best_ask - 1, -max_amount))
+                if position == 0:
+                    self.breakout_price = None
+                    self.current_mode = "market_making"
 
         return orders
 
@@ -641,6 +720,8 @@ class SquidInkStrategy(Strategy):
         self.fair_value_history.append(fair_value)
         if len(self.fair_value_history) > self.ma_window:
             self.fair_value_history.popleft()
+
+        
         pass
 
 class Config:
@@ -662,9 +743,8 @@ class Config:
             "strategy_cls": SquidInkStrategy,
             "position_limit": 50,          # 最大持仓量
             "ma_window": 200,          # 计算均价的时长
-            "vol_window": 100,         # 计算波动率的时长
-            "spread": 1,               
-            "std_threshold": 1,       
+            "max_deviation": 200,       # 偏离标准距离（最大距离）      
+            "band_width": 25,          # 波动率计算的宽度
         }
     }
 
