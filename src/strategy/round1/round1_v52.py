@@ -322,6 +322,8 @@ class KelpStrategy(Strategy):
         available_buy = max(0, self.position_limit - current_position)
         available_sell = max(0, self.position_limit + current_position)
 
+        fair_value = fair_value -0.03 * current_position
+
         orders = []
 
         # 吃单逻辑
@@ -354,9 +356,6 @@ class KelpStrategy(Strategy):
         ask_volume = sum(abs(v) for v in order_depth.sell_orders.values())
         total_volume = bid_volume + ask_volume
         volume_imbalance = (bid_volume - ask_volume) / total_volume if total_volume > 0 else 0
-        
-        imbalance_factor = 1  # 可以调试这个参数
-        fair_value += imbalance_factor * volume_imbalance
 
         # 考虑订单簿不平衡度来调整挂单价格
         bid_adjust = max(0, round(volume_imbalance * 2))  # 买盘压力大时降低买价
@@ -399,6 +398,7 @@ class KelpStrategy(Strategy):
 
     def load_state(self, state):
         return self.position_history
+
 
 
 class RainforestResinStrategy(Strategy):
