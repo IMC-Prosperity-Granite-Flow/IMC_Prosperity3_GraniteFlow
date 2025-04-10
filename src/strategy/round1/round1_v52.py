@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import List, Any, Dict, List, Tuple, Deque
+from typing import List, Any, Dict, List, Optional, Tuple, Deque
 import numpy as np
 import json
 import jsonpickle
@@ -285,32 +285,8 @@ class KelpStrategy(Strategy):
         self.trader_data = {}
         self.position_history = []
 
+
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """基于订单簿前三档的加权中间价计算"""
-
-        def weighted_avg(prices_vols, n=3):
-            total_volume = 0
-            price_sum = 0
-            # 按价格排序（买单调降序，卖单调升序）
-            sorted_orders = sorted(prices_vols.items(),
-                                   key=lambda x: x[0],
-                                   reverse=isinstance(prices_vols, dict))
-
-            # 取前n档或全部可用档位
-            for price, vol in sorted_orders[:n]:
-                abs_vol = abs(vol)
-                price_sum += price * abs_vol
-                total_volume += abs_vol
-            return price_sum / total_volume if total_volume > 0 else 0
-
-        # 计算买卖方加权均价
-        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
-        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
-
-        # 返回中间价
-        return (buy_avg + sell_avg) / 2
-
-    def calculate_true_value(self, order_depth: OrderDepth) -> float:
 
         total_volume = 0
         total_value = 0.0
@@ -339,11 +315,9 @@ class KelpStrategy(Strategy):
     def generate_orders(self, state: TradingState) -> List[Order]:
         take_position1 = 0
         take_position2 = 0
-        logger.print(
-            f"Current position: {state.position.get(self.symbol, 0)}, take_position1: {take_position1}, take_position2: {take_position2}")
         current_position = state.position.get(self.symbol, 0)
         order_depth = state.order_depths[self.symbol]
-        fair_value = self.calculate_true_value(order_depth)
+        fair_value = self.calculate_fair_value(order_depth)
 
         available_buy = max(0, self.position_limit - current_position)
         available_sell = max(0, self.position_limit + current_position)
@@ -417,9 +391,7 @@ class KelpStrategy(Strategy):
             orders.append(Order(self.symbol, desired_bid, desired_buy))
         if desired_sell > 0:
             orders.append(Order(self.symbol, desired_ask, -desired_sell))
-
-        logger.print(
-            f"Current position: {current_position}, take_position1: {take_position1}, take_position2: {take_position2}")
+            
         return orders
 
     def save_state(self, state) -> dict:
@@ -550,149 +522,216 @@ class RainforestResinStrategy(Strategy):
     def load_state(self, state):
         pass
 
+
 class SquidInkStrategy(Strategy):
-    """SQUIDINK策略"""
-    def __init__(self, symbol: str, position_limit: int, time_window: int, alpha: float, deviation_threshold: float, predict_length: int):
+    def __init__(self, symbol: str, position_limit: int, ma_window: int = 200,
+                max_deviation: int = 200, vol_threshold: float = 10, band_width: float = 25,
+                trend_window: int = 100, take_spread: float = 10):
         super().__init__(symbol, position_limit)
 
+        self.timestamp = 0
 
         #策略参数
-        self.time_window = time_window
-        self.alpha = -0.03
-        self.deviation_threshold = deviation_threshold
-        self.predict_length = predict_length
-        self.volatility_threshold = 10
+        self.ma_window = ma_window
+        self.max_deviation = max_deviation
+        self.vol_threshold = vol_threshold
+        self.band_width = band_width
+        self.trend_window = trend_window
+        self.take_spread = take_spread
 
-        self.timestamp = 0
-        self.is_volatile = False
+        #策略历史数据
+        self.fair_value_history = deque(maxlen=ma_window)
+        self.fair_value_ma200_history = deque(maxlen=ma_window)
+        self.current_mode = "market_making"
+        self.breakout_price: Optional[float] = None
+        
+        self.ma_short = 0
 
-        #历史数据
-        self.fair_value_history = Deque(maxlen=time_window)
-        self.mid_price_history = Deque(maxlen=time_window)
-        self.fair_value_ma10 = Deque(maxlen=time_window)
-        self.fair_value_ma20 = Deque(maxlen=time_window)
-        self.mid_price_history_ma20 = Deque(maxlen=time_window)
-        self.mid_reversion_gap = Deque(maxlen=time_window)
-        self.log_return5 = Deque(maxlen=time_window)
-
-
+        self.breakout_times = 0 
         self.calculator = FactorsCalculator()
 
-    def calculate_mid_price(self, order_depth: OrderDepth) -> float:
-        bid1_price = max(order_depth.buy_orders.keys())
-        ask1_price = min(order_depth.sell_orders.keys())
-        return (bid1_price + ask1_price) / 2
+    def calculate_fair_value(self, order_depth) -> float:
+        def weighted_avg(prices_vols, n=3):
+            total_volume = 0
+            price_sum = 0
+            # 按价格排序（买单调降序，卖单调升序）
+            sorted_orders = sorted(prices_vols.items(),
+                                   key=lambda x: x[0],
+                                   reverse=isinstance(prices_vols, dict))
 
-    def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """基于订单簿前三档的加权中间价计算"""
+            # 取前n档或全部可用档位
+            for price, vol in sorted_orders[:n]:
+                abs_vol = abs(vol)
+                price_sum += price * abs_vol
+                total_volume += abs_vol
+            return price_sum / total_volume if total_volume > 0 else 0
 
-        sell_orders = [(price, amount) for price, amount in order_depth.sell_orders.items() if amount != 0]
-        buy_orders = [(price, amount) for price, amount in order_depth.buy_orders.items() if amount != 0]
-        #计算加权均价
-        weighted_price = sum(price * amount for price, amount in buy_orders) + sum(price * -amount for price, amount in sell_orders)
-        sum_amount = sum(amount for price, amount in buy_orders) + sum(-amount for price, amount in sell_orders)
-        fair_value = weighted_price / sum_amount if sum_amount > 0 else 0
-        #保存历史数据
-        return fair_value
-    
+        # 计算买卖方加权均价
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+
+        # 返回中间价
+        return (buy_avg + sell_avg) / 2
+
     def generate_orders(self, state) -> List[Order]:
+        logger.print(f"breakout_times: {self.breakout_times}, timestamp: {self.timestamp}")
+        self.timestamp += 100
         orders = []
         order_depth = state.order_depths[self.symbol]
-        best_bid = max(order_depth.buy_orders)
-        best_ask = min(order_depth.sell_orders)
-        mid_price = (best_bid + best_ask) / 2
-        self.mid_prices.append(mid_price)
+        buy_orders = [(p, v) for p, v in order_depth.buy_orders.items() if v > 0]
+        sell_orders = [(p, v) for p, v in order_depth.sell_orders.items() if v > 0]
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+            
+        best_bid_amount = order_depth.buy_orders[best_bid]
+        best_ask_amount = order_depth.sell_orders[best_ask]
 
-        vol_10_ma20 = np.mean(self.vol_10[-20:])
+
+        position = state.position.get(self.symbol, 0)
+        fair_value = self.calculate_fair_value(order_depth)
+
+    
+        vol_10 = self.calculator.calculate_volatility(list(self.fair_value_history), 10)
+
+        # Strategy 1: Market making
+        if self.current_mode == "market_making":
+            if len(self.fair_value_ma200_history) < 200 or abs(fair_value - self.fair_value_ma200_history[-1]) <= self.band_width:
+                orders = []
+                # 获取当前市场数据
+                order_depth = state.order_depths[self.symbol]
+                current_position = state.position.get(self.symbol, 0)
+                max_position = self.position_limit
+
+                
+                if len(self.fair_value_history) >= self.trend_window:
+                    window_data = list(self.fair_value_history)[-self.trend_window:]
+                    self.ma_short = np.mean(window_data)
+                else:
+                    fair_value = self.calculate_fair_value(order_depth)
+                    self.ma_short = fair_value
+
+                available_buy = max(0, max_position - current_position)
+                available_sell = max(0, max_position + current_position)
+
+                # 处理卖单（asks）的限价单
+                for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
+                    if ask_price < (self.ma_short - 10):
+                        quantity = min(-ask_volume, available_buy)
+                        if quantity > 0:
+                            orders.append(Order(self.symbol, ask_price, quantity))
+                            available_buy -= quantity
+
+                # 处理买单（bids）的限价单
+                for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                    if bid_price > (self.ma_short + 10):
+                        quantity = min(bid_volume, available_sell)
+                        if quantity > 0:
+                            orders.append(Order(self.symbol, bid_price, -quantity))
+                            available_sell -= quantity
+
+                # 挂出被动做市单
+                fair_value = self.ma_short
+
+                # 计算挂单价格
+                buy_price = math.floor(fair_value - self.take_spread)
+                sell_price = math.ceil(fair_value + self.take_spread)
+
+                # 确保不超过仓位限制
+                if available_buy > 0:
+                    orders.append(Order(self.symbol, buy_price, available_buy))
+                if available_sell > 0:
+                    orders.append(Order(self.symbol, sell_price, -available_sell))
+
+                return orders
+
+            elif all(x != 0 for x in self.fair_value_ma200_history):
+                logger.print(f"Break! {fair_value}")
+                self.breakout_price = fair_value
+                self.breakout_times += 1
+                #反向吃满
+                direction = 1 if fair_value - self.fair_value_ma200_history[-1] else -1 #记录突破方向
+
+                if direction == 1:
+                    #突破是向上的，先做多
+                    max_amount = min(best_ask_amount, self.position_limit - position)
+                    orders.append(Order(self.symbol, best_ask - 1, max_amount))
+                if direction == -1:
+                    #突破是向下的，先做空
+                    max_amount = min(-best_bid_amount, position - self.position_limit)
+                    orders.append(Order(self.symbol, best_bid + 1, -max_amount))
+
+                self.current_mode = "trend_following"
+
+        # Strategy 2: Breakout
+        elif self.current_mode == "trend_following" and self.breakout_price is not None:
+            distance = fair_value - self.breakout_price
+            direction = 1 if distance > 0 else -1 #往上突破为1 往下突破为0
+
+            #先检查仓位有没有反向吃满，如果没有则先吃满
+            if position * direction < self.position_limit:
+                #继续下单
+                if direction == 1:
+                    #突破是向上的，先做多
+                    max_amount = min(best_ask_amount, self.position_limit - position)
+                    orders.append(Order(self.symbol, best_ask - 1, max_amount))
+                if direction == -1:
+                    #突破是向下的，先做空
+                    max_amount = min(-best_bid_amount, position - self.position_limit)
+                    orders.append(Order(self.symbol, best_bid + 1, -max_amount))
+            
+            else:
+                #只有吃满了仓位才开始反转
+                target_position = -direction * self.position_limit
+                delta_position = target_position - position
+
+                current_position = state.position.get(self.symbol, 0)
+                if delta_position != 0:
+                    res_position = self.position_limit - position if direction == 1 else position + self.position_limit
+                    amount = min(abs(distance) * direction * delta_position / self.max_deviation, res_position)
+                    #注意amount已经包括了direction
+                    if direction == 1:
+                        orders.append(Order(self.symbol, best_ask - 1, amount))
+                    if direction == -1:
+                        orders.append(Order(self.symbol, best_bid + 1, amount))
+                
+
+            # 回归就清仓
+            if abs(fair_value - self.breakout_price) < vol_10 * 0.5:
+                logger.print(f"Fall back! {fair_value}")
+                if position != 0:
+                    logger.print(f"Close position {position}")
+                    if direction == 1:
+                        #突破是向上的，平空
+                        max_amount = min(best_bid_amount, -position)
+                        orders.append(Order(self.symbol, best_bid + 1, max_amount))
         
-        #判断是否进入波动状态
+                    if direction == -1:
+                        #突破是向下的，平多
+                        max_amount = min(best_ask_amount, position)
+                        orders.append(Order(self.symbol, best_ask - 1, -max_amount))
 
-        if vol_10_mean > self.volatility_threshold:
-            self.is_volatile = True
-        else:
-            self.is_volatile = False
-
-
-        if is_volatile:
-            # 趋势策略（如动量突破）
-            if len(self.mid_prices) >= 20:
-                recent = list(self.mid_prices)[-20:]
-                if mid_price > max(recent):
-                    volume = min(-order_depth.sell_orders[best_ask], self.position_limit - self.position)
-                    if volume > 0:
-                        orders.append(Order(self.symbol, best_ask, volume))
-                        self.position += volume
-                elif mid_price < min(recent):
-                    volume = min(order_depth.buy_orders[best_bid], self.position_limit + self.position)
-                    if volume > 0:
-                        orders.append(Order(self.symbol, best_bid, -volume))
-                        self.position -= volume
-        else:
-        #波动率不大，做市策略。
-            # 计算fair_value
-            fair_value = self.calculate_fair_value(order_depth)
+                if position == 0:
+                    logger.print(f"Back to market making mode")
+                    self.breakout_price = None
+                    self.current_mode = "market_making"
 
         return orders
 
     def save_state(self, state):
         return {}
-    
-    
+
     def load_state(self, state):
-
-        #记录timestamp
-        self.timestamp += 100
-        logger.print('Current timestamp: ', self.timestamp)
-
-        #保存fair_value
-        self.fair_value_history.append(self.calculate_fair_value(state.order_depths[self.symbol]))
-        if len(self.fair_value_history) > self.time_window:
+        fair_value = self.calculate_fair_value(state.order_depths[self.symbol])
+        self.fair_value_history.append(fair_value)
+        if len(self.fair_value_history) > self.ma_window:
             self.fair_value_history.popleft()
-        #logger.print("fair value history: ", self.fair_value_history)
-        #保存ma10
-        self.fair_value_ma10.append(self.calculator.calculate_ma(list(self.fair_value_history), 10))
-        if len(self.fair_value_ma10) > self.time_window:
-            self.fair_value_ma10.popleft()
-        #logger.print("fair value ma10: ", self.fair_value_ma10)
-        #保存ma20
-        self.fair_value_ma20.append(self.calculator.calculate_ma(list(self.fair_value_history), 20))
-        if len(self.fair_value_ma20) > self.time_window:
-            self.fair_value_ma20.popleft()
-        #logger.print("fair value ma20: ", self.fair_value_ma20)
 
-        #保存mid_price
-        mid_price = self.calculate_mid_price(state.order_depths[self.symbol])
-        self.mid_price_history.append(mid_price)
-        if len(self.mid_price_history) > self.time_window:
-            self.mid_price_history.popleft()
-        #logger.print("mid price history: ", self.mid_price_history)
-        #保存mid_price_ma20
-        mid_price_history_ma20 = self.calculator.calculate_ma(list(self.mid_price_history), 20)
-        self.mid_price_history_ma20.append(mid_price_history_ma20)
-        if len(self.mid_price_history_ma20) > self.time_window:
-            self.mid_price_history_ma20.popleft()
-        #logger.print("mid price history ma20: ", self.mid_price_history_ma20)
-        #保存mid_reversion_gap
-        mid_reversion_gap = self.calculator.get_mid_reversion_gap(self.mid_price_history, self.mid_price_history_ma20)
-        self.mid_reversion_gap.append(mid_reversion_gap)
-        if len(self.mid_reversion_gap) > self.time_window:
-            self.mid_reversion_gap.popleft()
-        #logger.print("mid reversion gap: ", self.mid_reversion_gap)
-
-        #保存预测的log_return5
-        a = 3.777e-6
-        b = 0.0003
-        if all(x != 0 for x in self.mid_price_history and self.mid_price_history_ma20):
-            log_return5 = a + b * mid_reversion_gap
-        else:
-            log_return5 = 0
-        self.log_return5.append(log_return5)
-        if len(self.log_return5) > self.time_window:
-            self.log_return5.popleft()
-        logger.print("log return5: ", self.log_return5)
-
+        fair_value_ma200 = self.calculator.calculate_ma(list(self.fair_value_history), 200) if len(self.fair_value_history) >= 200 else 0
+        self.fair_value_ma200_history.append(fair_value_ma200)
+        if len(self.fair_value_ma200_history) > self.ma_window:
+            self.fair_value_ma200_history.popleft()
+        
         pass
-
 
 class Config:
     def __init__(self):
@@ -712,14 +751,13 @@ class Config:
         "SQUID_INK": {
             "strategy_cls": SquidInkStrategy,
             "position_limit": 50,          # 最大持仓量
-            "time_window": 20,             # 计算均价的时长
-            "alpha": -0.03,                # 公允价格偏移
-            "deviation_threshold": 15,   # 偏离均值回归的阈值
-            "predict_length": 5,          #预测时使用历史数据窗口长度
-            "volatility_threshold": 10    #波动率阈值(使用vol10)
+            "ma_window": 200,          # 计算均价的时长
+            "max_deviation": 200,       # 偏离标准距离（最大距离）      
+            "band_width": 30,          # 波动率计算的宽度
+            "trend_window": 100,       # 趋势判断的时长
+            "take_spread": 10
         }
     }
-    
 
 class Trader:
     def __init__(self, product_config=None):

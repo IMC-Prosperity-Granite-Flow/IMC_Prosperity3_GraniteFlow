@@ -542,16 +542,34 @@ class SquidInkStrategy(Strategy):
         self.current_mode = "market_making"
         self.breakout_price: Optional[float] = None
 
+        self.breakout_times = 0 
         self.calculator = FactorsCalculator()
 
     def calculate_fair_value(self, order_depth) -> float:
-        buy_orders = [(p, v) for p, v in order_depth.buy_orders.items() if v > 0]
-        sell_orders = [(p, v) for p, v in order_depth.sell_orders.items() if v > 0]
-        weighted_price = sum(p * v for p, v in buy_orders + sell_orders)
-        total_volume = sum(v for p, v in buy_orders + sell_orders)
-        return weighted_price / total_volume if total_volume else 0
+        def weighted_avg(prices_vols, n=3):
+            total_volume = 0
+            price_sum = 0
+            # 按价格排序（买单调降序，卖单调升序）
+            sorted_orders = sorted(prices_vols.items(),
+                                   key=lambda x: x[0],
+                                   reverse=isinstance(prices_vols, dict))
+
+            # 取前n档或全部可用档位
+            for price, vol in sorted_orders[:n]:
+                abs_vol = abs(vol)
+                price_sum += price * abs_vol
+                total_volume += abs_vol
+            return price_sum / total_volume if total_volume > 0 else 0
+
+        # 计算买卖方加权均价
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+
+        # 返回中间价
+        return (buy_avg + sell_avg) / 2
 
     def generate_orders(self, state) -> List[Order]:
+        logger.print(f"breakout_times: {self.breakout_times}, timestamp: {self.timestamp}")
         self.timestamp += 100
         orders = []
         order_depth = state.order_depths[self.symbol]
@@ -573,6 +591,7 @@ class SquidInkStrategy(Strategy):
         # Strategy 1: Market making
         if self.current_mode == "market_making":
             if len(self.fair_value_ma200_history) < 200 or abs(fair_value - self.fair_value_ma200_history[-1]) <= self.band_width:
+                logger.print(f"len of fair_value_ma200_history {len(self.fair_value_ma200_history)} ")
                 logger.print("Market making mode")
                 take_position1 = 0
                 take_position2 = 0
@@ -658,6 +677,7 @@ class SquidInkStrategy(Strategy):
             elif all(x != 0 for x in self.fair_value_ma200_history):
                 logger.print(f"Break! {fair_value}")
                 self.breakout_price = fair_value
+                self.breakout_times += 1
                 #反向吃满
                 direction = 1 if fair_value - self.fair_value_ma200_history[-1] else -1 #记录突破方向
 
@@ -678,7 +698,7 @@ class SquidInkStrategy(Strategy):
             direction = 1 if distance > 0 else -1 #往上突破为1 往下突破为0
 
             #先检查仓位有没有反向吃满，如果没有则先吃满
-            if abs(position) < self.position_limit:
+            if position * direction < self.position_limit:
                 #继续下单
                 if direction == 1:
                     #突破是向上的，先做多
@@ -706,18 +726,22 @@ class SquidInkStrategy(Strategy):
                 
 
             # 回归就清仓
-            if fair_value - self.breakout_price < direction * vol_10:
+            if abs(fair_value - self.breakout_price) < vol_10 * 0.5:
+                logger.print(f"Fall back! {fair_value}")
                 if position != 0:
+                    logger.print(f"Close position {position}")
                     if direction == 1:
                         #突破是向上的，平空
                         max_amount = min(best_bid_amount, -position)
                         orders.append(Order(self.symbol, best_bid + 1, max_amount))
+        
                     if direction == -1:
                         #突破是向下的，平多
                         max_amount = min(best_ask_amount, position)
                         orders.append(Order(self.symbol, best_ask - 1, -max_amount))
 
                 if position == 0:
+                    logger.print(f"Back to market making mode")
                     self.breakout_price = None
                     self.current_mode = "market_making"
 
@@ -732,6 +756,10 @@ class SquidInkStrategy(Strategy):
         if len(self.fair_value_history) > self.ma_window:
             self.fair_value_history.popleft()
 
+        fair_value_ma200 = self.calculator.calculate_ma(list(self.fair_value_history), 200) if len(self.fair_value_history) >= 200 else 0
+        self.fair_value_ma200_history.append(fair_value_ma200)
+        if len(self.fair_value_ma200_history) > self.ma_window:
+            self.fair_value_ma200_history.popleft()
         
         pass
 
@@ -755,7 +783,7 @@ class Config:
             "position_limit": 50,          # 最大持仓量
             "ma_window": 200,          # 计算均价的时长
             "max_deviation": 200,       # 偏离标准距离（最大距离）      
-            "band_width": 25,          # 波动率计算的宽度
+            "band_width": 30,          # 波动率计算的宽度
         }
     }
 
