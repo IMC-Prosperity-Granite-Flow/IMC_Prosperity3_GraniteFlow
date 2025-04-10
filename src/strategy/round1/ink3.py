@@ -128,141 +128,151 @@ logger = Logger()
 
 # 4951
 class Trader:
+    # 参数配置分离（每个品种独立配置）
+    PRODUCT_CONFIG = {
+        "RAINFOREST_RESIN": {
+            "base_offset": 3,  # 基础报价偏移
+            "max_position": 50,  # 最大持仓
+            "eat_position1": 0,  # 固定的吃单的仓位（初始值）
+            "eat_position2": 0,
+            "level2spread": 8,  # spread超过这个值就用另一个offset
+        },
+        "KELP": {
+            "max_position": 50,  # 最大持仓
+            "eat_position1": 0,
+            "eat_position2": 0,  # 固定的吃单的仓位（初始值）
+
+        },
+        "SQUID_INK": {
+            "max_position": 50,  # 最大持仓
+            "ma":100
+        }
+    }
 
     def __init__(self):
         # 策略路由字典（产品名: 对应的策略方法）
-        self.product_config = {
-            "SQUID_INK": {
-                "max_position": 50,
-                "price_zones": [
-                    {"min": 500, "max": 1800, "spread": 15, "layers": 3},  # 超卖区
-                    {"min": 1800, "max": 1860, "spread": 3, "layers": 5},  # 低位震荡区
-                    {"min": 1860, "max": 1950, "spread": 3, "layers": 8},  # 主力交易区
-                    {"min": 1950, "max": 2050, "spread": 3, "layers": 10},  # 核心波动区
-                    {"min": 2050, "max": 2150, "spread": 10, "layers": 5},  # 高位震荡区
-                    {"min": 2150, "max": 4000, "spread": 15, "layers": 3}  # 超买区
-                ],
-                "base_quantity": 5,  # 每层基础数量
-                "safety_margin": 3,  # 安全边界ticks
-                "trend_window": 50,
-            }
+        self.strategy_router = {
+            "RAINFOREST_RESIN": self.rainforestresin_strategy,
+            "KELP": self.kelp_strategy,
+            "SQUID_INK": self.ink_strategy
         }
-        self.price_history = {}
-        self.price_predictions = {}
-        self.ma_short = {}
-        self.ma_long = {}
+        self.price_history = defaultdict(lambda: deque(maxlen=120))  # 每个产品维护最近20个价格
+        self.ma_history = defaultdict(lambda: deque(maxlen=10))  # 每个产品维护最近4个MA值
 
+    def calculate_true_value(self, order_depth: OrderDepth) -> float:
+        """使用订单簿的买卖订单和成交量计算加权平均价格（修正版）"""
+        # 处理买盘订单（buy_orders 的 volume 应为正数）
+        buy_prices = np.array(list(order_depth.buy_orders.keys()))
+        buy_volumes = np.array(list(order_depth.buy_orders.values()))
+        sum_buy = np.sum(buy_prices * buy_volumes)
+        sum_buy_vol = np.sum(buy_volumes)
 
-    def calculate_current_value(self, symbol: str, order_depth: OrderDepth) -> float:
-        """基于订单簿和历史数据计算估计的真实价值"""
-        config = self.product_config[symbol]
+        # 处理卖盘订单（sell_orders 的 volume 取绝对值）
+        sell_prices = np.array(list(order_depth.sell_orders.keys()))
+        sell_volumes = np.array([abs(v) for v in order_depth.sell_orders.values()])  # 关键修正点
+        sum_sell = np.sum(sell_prices * sell_volumes)
+        sum_sell_vol = np.sum(sell_volumes)
 
-        # 使用交易量加权方式整合订单簿两侧的数据
-        total_volume = 0
-        total_value = 0.0
+        # 计算买卖双方的 VWAP
+        vwap_bid = sum_buy / sum_buy_vol if sum_buy_vol > 0 else None
+        vwap_ask = sum_sell / sum_sell_vol if sum_sell_vol > 0 else None
 
-        # 处理买单（按价格从高到低排序）
-        for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
-            abs_volume = abs(volume)
-            total_value += price * abs_volume
-            total_volume += abs_volume
-
-        # 处理卖单（按价格从低到高排序）
-        for price, volume in sorted(order_depth.sell_orders.items()):
-            abs_volume = abs(volume)
-            total_value += price * abs_volume
-            total_volume += abs_volume
-
-        if total_volume > 0:
-            current_value = total_value / total_volume
+        # 计算综合 VWAP（确保双方均有有效值）
+        if vwap_bid is not None and vwap_ask is not None:
+            vwap = (vwap_bid + vwap_ask) / 2
         else:
-            # 备选方案：使用中间价
-            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else 0
-            current_value = (best_bid + best_ask) / 2 if best_bid and best_ask else 1970  # 使用平均价格作为默认值
+            vwap = 0.0  # 数据不完整时回退到 0
+        logger.print(f"-----vwap: {vwap:.2f}-----")
+        return vwap
 
-        if symbol not in self.price_history:
-            self.price_history[symbol] = []
-            self.last_true_value[symbol] = current_value
+    def calculate_mid_price(self, order_depth: OrderDepth) -> float:
+        """计算中间价"""
+        buy_prices = order_depth.buy_orders.keys()
+        sell_prices = order_depth.sell_orders.keys()
 
-        self.price_history[symbol].append(current_value)
+        best_ask = min(sell_prices) if sell_prices else 0
+        best_bid = max(buy_prices) if buy_prices else 0
+        logger.print(f"Best ask {best_ask}, Best bid {best_bid}")
+        mid_price = (best_ask + best_bid) / 2 if best_ask and best_bid else 0
+        return mid_price
 
-        history_limit = 50
-        if len(self.price_history[symbol]) > history_limit:
-            self.price_history[symbol] = self.price_history[symbol][-history_limit:]
+    def run(self, state: TradingState) -> tuple[Dict[str, List[Order]], int, str]:
+        result = {}
+        conversions = 10
+        trader_data = "SAMPLE"
 
+        # 预处理：计算所有产品的midprice并记录历史
+        for product in self.PRODUCT_CONFIG:
+            if product in state.order_depths:
+                order_depth = state.order_depths[product]
+                true_value = self.calculate_mid_price(order_depth)
+                self.price_history[product].append(true_value)  # 记录价格到历史
+            # 策略调用
+            od = state.order_depths.get(product, None)
+            if not od or not od.buy_orders or not od.sell_orders:
+                result[product] = []
+                continue
 
-        return current_value
+            if product in self.strategy_router:
+                strategy = self.strategy_router[product]
+                result[product] = strategy(
+                    od,
+                    state.position.get(product, 0),
+                    product,
+                )
+        logger.flush(state, result, conversions, trader_data)
+        return result, conversions, trader_data
 
-
-    def get_best_orders(self, symbol: str, current_value: float, order_depth: OrderDepth, position: int) -> List[Order]:
-        """根据估计的真实价值和当前市场状况生成最佳订单"""
-        config = self.product_config[symbol]
+    def ink_strategy(self, order_depth: OrderDepth, current_pos: int, product: str) -> List[Order]:
+        config = self.PRODUCT_CONFIG[product]
         orders = []
+        max_pos = config["max_position"]
+        history = self.price_history[product]
+        m = self.ma_history.get(product, deque(maxlen=4))
+        if len(history) < 120:
+            return orders  # 数据不足时不交易
+        ma20 = np.mean(history)
+        stdev = np.std(history)
+        #self.ma_history[product].append(ma20)
+        logger.print(f"MA20: {ma20:.2f} STDEV: {stdev:.2f}")
+        #if len(m) < 4:
+        #    return orders
+        available_buy = max(0, max_pos - current_pos)
+        available_sell = max(0, max_pos + current_pos)
 
-        max_position = config["max_position"]
-        available_buy = max(0, max_position - position)
-        available_sell = max(0, max_position + position)
+        for ask, vol in sorted(order_depth.sell_orders.items()):
+            if ask < ma20 - 10:
+                quantity = min(-vol, available_buy)
+                if quantity > 0:
+                    orders.append(Order(product, ask, quantity))
+                    available_buy -= quantity
 
-        if len(self.price_history[symbol]) >= config["trend_window"]:
-            self.ma_short[symbol] = np.mean(self.price_history[symbol][-config["trend_window"]:])
-        else:
-            self.ma_short[symbol] = current_value
-
-
-        current_zone = None
-        for zone in config["price_zones"]:
-            if zone["min"] <= self.ma_short[symbol] < zone["max"]:
-                current_zone = zone
-                break
-        if not current_zone:
-            logger.print(f"MA50超出预设区间")
-            return orders
-
-
-        # 生成区间边界订单
-        zone_min = current_zone["min"]
-        zone_max = current_zone["max"]
-        spread = current_zone["spread"]
-
-        # 计算基准价格
-        buy_base = zone_min + spread
-        sell_base = zone_max - spread
+        # 卖出逻辑（价格高于MA20 + stdev）
+        for bid, vol in sorted(order_depth.buy_orders.items(), reverse=True):
+            if bid > ma20 + 10:
+                quantity = min(vol, available_sell)
+                if quantity > 0:
+                    orders.append(Order(product, bid, -quantity))
+                    available_sell -= quantity
 
         if available_buy > 0:
-            orders.append(Order(symbol, buy_base, available_buy))
-
+            orders.append(Order(product, math.floor(ma20 - 10), available_buy))
         if available_sell > 0:
-            orders.append(Order(symbol, sell_base, -available_sell))
+            orders.append(Order(product, math.ceil(ma20 + 10), -available_sell))
+
+        logger.print(f"Current Position: {current_pos}/{max_pos}")
+        logger.print(f"Generated Orders: {orders}")
+        return orders
+
+    def rainforestresin_strategy(self, order_depth: OrderDepth, current_pos: int, product: str) -> List[Order]:
+        config = self.PRODUCT_CONFIG[product]
+        orders = []
 
         return orders
 
 
-    def run(self, state: TradingState) -> tuple[Dict[str, List[Order]], int, str]:
-        """游戏调用的主方法"""
-        result = {}
-        conversions = 0
-        trader_data = json.dumps({
-            "price_history": {k: v[-5:] if len(v) > 5 else v for k, v in self.price_history.items()},
-        })
+    def kelp_strategy(self, order_depth: OrderDepth, current_pos: int, product: str) -> List[Order]:
+        config = self.PRODUCT_CONFIG[product]
+        orders = []
 
-        symbol = "SQUID_INK"
-
-        # 检查是否有此交易对的市场数据
-        if symbol in state.order_depths:
-            order_depth = state.order_depths[symbol]
-            position = state.position.get(symbol, 0)
-
-            # 只有当同时存在买单和卖单时才交易
-            if order_depth.buy_orders and order_depth.sell_orders:
-                # 基于订单簿和历史数据计算真实价值
-                current_value = self.calculate_current_value(symbol, order_depth)
-
-                # 根据真实价值和当前市场生成订单
-                orders = self.get_best_orders(symbol, current_value, order_depth, position)
-
-                # 将订单添加到结果中
-                result[symbol] = orders
-
-        logger.flush(state, result, conversions, trader_data)
-        return result, conversions, trader_data
+        return orders
