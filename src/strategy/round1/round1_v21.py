@@ -591,34 +591,51 @@ class SquidInkStrategy(Strategy):
 
 
         logger.print("Taking")
+        
         if len(self.log_return5) == self.time_window and all (x != 0 for x in list(self.log_return5)):
-            #如果连续预测收益为正，买入
-            if all(x > 0 for x in list(self.log_return5)[-self.predict_length:]):
-                max_return_long = 0.052
-                logger.print("All log returns are positive, taking position")
-                mean_return = np.mean(list(self.log_return5)[-self.predict_length:])
+            #如果平均收益为正，买入
+            mean_return = np.mean(list(self.log_return5)[-self.predict_length:])
+            max_return_long = 0.05
+            if mean_return > 0:
+                logger.print("Log mean returns is positive, taking position")
+                
                 max_buy_amount = max(0, self.position_limit - position)
                 return_ratio = mean_return / max_return_long
-                if return_ratio > 0.05:
+                if return_ratio > 1:
                     buy_amount = max_buy_amount
                     if buy_amount > 0:
-                        logger.print(f"Buying at {best_ask - 1}, amount: {buy_amount}")
-                        orders.append(Order(self.symbol, best_ask - 1, buy_amount))
+                        logger.print(f"Buying at {best_ask}, amount: {buy_amount}")
+                        orders.append(Order(self.symbol, best_ask, buy_amount))
+                else:
+                    buy_amount = int(return_ratio * self.position_limit) - position
+                    if buy_amount > max_buy_amount:
+                        buy_amount = max_buy_amount
+                    if buy_amount > 0:
+                        logger.print(f"Buying at {best_ask}, amount: {buy_amount}")
+                        orders.append(Order(self.symbol, best_ask, buy_amount))
                     position += buy_amount
+                
             #如果连续预测收益为负数，卖出
-            if all(x < 0 for x in list(self.log_return5)[-self.predict_length:]):
-                max_return_short = -0.055
-                logger.print("All log returns are negative, taking position")
-                mean_return = np.mean(list(self.log_return5)[-self.predict_length:])
+            max_return_short = -0.05
+            if mean_return < 0:
+                logger.print("Log mean returns is negative, taking position")
+
+                max_sell_amount = max(0, position + self.position_limit)
                 return_ratio = mean_return / max_return_short
-                if return_ratio > 0.05:
-                    max_sell_amount = max(0, position + self.position_limit)
+                if return_ratio > 1:
                     sell_amount = max_sell_amount
                     if sell_amount > 0:
-                        logger.print(f"Selling at {best_bid + 1}, amount: {sell_amount}")
-                        orders.append(Order(self.symbol, best_bid + 1, -sell_amount))
-                        position -= sell_amount
-        
+                        logger.print(f"Selling at {best_bid}, amount: {sell_amount}")
+                        orders.append(Order(self.symbol, best_bid, -sell_amount))
+                else:
+                    sell_amount = int(return_ratio * self.position_limit) + position
+                    if sell_amount > max_sell_amount:
+                        sell_amount = max_sell_amount
+                    if sell_amount > 0:
+                        logger.print(f"Selling at {best_bid}, amount: {sell_amount}")
+                        orders.append(Order(self.symbol, best_bid, -sell_amount))
+                    position -= sell_amount
+                       
             
 
 
