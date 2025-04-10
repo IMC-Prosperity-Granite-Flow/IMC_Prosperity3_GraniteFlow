@@ -526,7 +526,7 @@ class RainforestResinStrategy(Strategy):
 class SquidInkStrategy(Strategy):
     def __init__(self, symbol: str, position_limit: int, ma_window: int = 200,
                 max_deviation: int = 200, vol_threshold: float = 10, band_width: float = 25,
-                trend_window: int = 100, take_spread: float = 10):
+                trend_window: int = 100, take_spread: float = 10, break_step: float = 10, fallback_threshold: float = 0.1):
         super().__init__(symbol, position_limit)
 
         self.timestamp = 0
@@ -538,6 +538,8 @@ class SquidInkStrategy(Strategy):
         self.band_width = band_width
         self.trend_window = trend_window
         self.take_spread = take_spread
+        self.break_step = break_step
+        self.fallback_threshold = fallback_threshold
 
         #策略历史数据
         self.fair_value_history = deque(maxlen=ma_window)
@@ -620,7 +622,7 @@ class SquidInkStrategy(Strategy):
 
                 # 处理卖单（asks）的限价单
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-                    if ask_price < (self.ma_short - 10):
+                    if ask_price < (self.ma_short - self.take_spread):
                         quantity = min(-ask_volume, available_buy)
                         if quantity > 0:
                             orders.append(Order(self.symbol, ask_price, quantity))
@@ -629,7 +631,7 @@ class SquidInkStrategy(Strategy):
 
                 # 处理买单（bids）的限价单
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                    if bid_price > (self.ma_short + 10):
+                    if bid_price > (self.ma_short + self.take_spread):
                         quantity = min(bid_volume, available_sell)
                         if quantity > 0:
                             orders.append(Order(self.symbol, bid_price, -quantity))
@@ -687,15 +689,15 @@ class SquidInkStrategy(Strategy):
         elif self.current_mode == "trend_following" and self.breakout_price is not None:
             distance = fair_value - self.breakout_price
             #记录最大突破距离：
-            if abs(distance) > self.max_breakout_distance + 10:
+            if abs(distance) > self.max_breakout_distance + self.break_step:
                 self.max_breakout_distance = abs(distance)
             self.direction = 1 if distance > 0 else -1 #往上突破为1 往下突破为0
             position = state.position.get(self.symbol, 0)
 
             #判断价格是否回归
-            logger.print(f"Current distance: {(fair_value - self.breakout_price) * self.direction}, distance_threshold: {vol_10 * 0.1}")
+            logger.print(f"Current distance: {(fair_value - self.breakout_price) * self.direction}, distance_threshold: {vol_10 * self.fallback_threshold}")
             # 回归就清仓
-            if (fair_value - self.breakout_price) * self.direction < vol_10 * 0.1:
+            if (fair_value - self.breakout_price) * self.direction < vol_10 * self.fallback_threshold:
                 logger.print(f"Fall back! {fair_value}")
                 if position != 0:
                     logger.print(f"Close position {position}")
@@ -795,7 +797,9 @@ class Config:
             "max_deviation": 200,       # 偏离标准距离（最大距离）      
             "band_width": 30,          # 波动率计算的宽度
             "trend_window": 100,       # 趋势判断的时长
-            "take_spread": 10
+            "take_spread": 10,          #market making mode take width
+            "break_step": 15,           #price range to next reverse order
+            "fallback_threshold": 0,   #price range to fall back * vol_10
         }
     }
 
