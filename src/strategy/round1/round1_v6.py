@@ -226,7 +226,7 @@ class FactorsCalculator:
         short_ema = self.calculate_ema(prices[-20:], 5, product)
         long_ema = self.calculate_ema(prices[-20:], 20, product)
         return short_ema - long_ema
-
+    
     def get_mid_reversion_gap(self, mid_prices: list, mid_prices_20: list):
         '''计算mid price回归距离'''
         return mid_prices[-1] - mid_prices_20[-1]
@@ -257,19 +257,18 @@ class Strategy(ABC):
         order_depth = state.order_depths.get(self.symbol, OrderDepth())
         if not order_depth.buy_orders and not order_depth.sell_orders:
             return [], {}
-
+         
         # 生成订单
         self.orders = self.generate_orders(state)
-
+        
         # 保存策略状态，用于下次加载（包括仓位、因子等历史信息）
         strategy_state = self.save_state(state)
 
         return self.orders, strategy_state
-
+    
     def save_state(self, state) -> dict:
         """保存策略状态"""
         return {}
-
     def load_state(self, state: TradingState):
         """加载策略状态"""
         pass
@@ -285,6 +284,7 @@ class KelpStrategy(Strategy):
         self.alpha = beta  # adjusted fair price订单簿不平衡度系数
         self.trader_data = {}
         self.position_history = []
+
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
 
@@ -311,7 +311,7 @@ class KelpStrategy(Strategy):
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
             best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else 0
             return (best_bid + best_ask) / 2 if best_bid and best_ask else 0
-
+        
     def generate_orders(self, state: TradingState) -> List[Order]:
         take_position1 = 0
         take_position2 = 0
@@ -322,7 +322,7 @@ class KelpStrategy(Strategy):
         available_buy = max(0, self.position_limit - current_position)
         available_sell = max(0, self.position_limit + current_position)
 
-        fair_value = fair_value - 0.03 * current_position
+        fair_value = fair_value -0.03 * current_position
 
         orders = []
 
@@ -390,7 +390,7 @@ class KelpStrategy(Strategy):
             orders.append(Order(self.symbol, desired_bid, desired_buy))
         if desired_sell > 0:
             orders.append(Order(self.symbol, desired_ask, -desired_sell))
-
+            
         return orders
 
     def save_state(self, state) -> dict:
@@ -398,6 +398,7 @@ class KelpStrategy(Strategy):
 
     def load_state(self, state):
         return self.position_history
+
 
 
 class RainforestResinStrategy(Strategy):
@@ -461,7 +462,7 @@ class RainforestResinStrategy(Strategy):
                 if buyable > 0:
                     orders.append(Order(self.symbol, ask, buyable))
                     take_position1 += buyable
-            elif ask == FIXED_MID and available_sell < 30:
+            elif ask == FIXED_MID and available_sell< 30:
                 buyable = min(-vol, self.position_limit - position)
                 orders.append(Order(self.symbol, ask, buyable))
                 take_position1 += buyable
@@ -485,6 +486,7 @@ class RainforestResinStrategy(Strategy):
             else:
                 break  # 后续价格更低，不再处理
 
+
         # 挂单逻辑 ================================================
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
@@ -492,26 +494,27 @@ class RainforestResinStrategy(Strategy):
         if spread > level2spread:
             offset = 4
         desired_bid = best_bid + 1
-        if desired_bid > 10000:
-            desired_bid = second_bid + 1
+        if desired_bid>10000:
+            desired_bid = second_bid +1
 
         desired_ask = best_ask - 1
-        if desired_ask < 10000:
-            desired_ask = second_ask - 1
+        if desired_ask<10000:
+            desired_ask = second_ask -1
 
         # 计算可用挂单量
         desired_buy = available_buy - take_position1
         desired_sell = available_sell - take_position2  # 固定吃单额度
 
         # 买盘挂单（正数表示买入）
-        if desired_buy > 0:
+        if desired_buy > 0 :
             orders.append(Order(self.symbol, desired_bid, desired_buy))
 
         # 卖盘挂单（负数表示卖出）
-        if desired_sell > 0:
+        if desired_sell > 0 :
             orders.append(Order(self.symbol, desired_ask, -desired_sell))
 
         return orders
+
 
     def save_state(self, state) -> dict:
         return {}
@@ -521,14 +524,14 @@ class RainforestResinStrategy(Strategy):
 
 
 class SquidInkStrategy(Strategy):
-    def __init__(self, symbol: str, position_limit: int, ma_window: int = 120,
-                 max_deviation: int = 200, vol_threshold: float = 10, band_width: float = 25,
-                 trend_window: int = 100, take_spread: float = 10):
+    def __init__(self, symbol: str, position_limit: int, ma_window: int = 200,
+                max_deviation: int = 200, vol_threshold: float = 10, band_width: float = 25,
+                trend_window: int = 100, take_spread: float = 10):
         super().__init__(symbol, position_limit)
 
         self.timestamp = 0
 
-        # 策略参数
+        #策略参数
         self.ma_window = ma_window
         self.max_deviation = max_deviation
         self.vol_threshold = vol_threshold
@@ -536,15 +539,15 @@ class SquidInkStrategy(Strategy):
         self.trend_window = trend_window
         self.take_spread = take_spread
 
-        # 策略历史数据
+        #策略历史数据
         self.fair_value_history = deque(maxlen=ma_window)
-        self.fair_value_ma120_history = deque(maxlen=ma_window)
+        self.fair_value_ma200_history = deque(maxlen=ma_window)
         self.current_mode = "market_making"
         self.breakout_price: Optional[float] = None
-
+        
         self.ma_short = 0
 
-        self.breakout_times = 0
+        self.breakout_times = 0 
         self.calculator = FactorsCalculator()
 
     def calculate_fair_value(self, order_depth) -> float:
@@ -579,24 +582,27 @@ class SquidInkStrategy(Strategy):
         sell_orders = [(p, v) for p, v in order_depth.sell_orders.items() if v > 0]
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-
+            
         best_bid_amount = order_depth.buy_orders[best_bid]
         best_ask_amount = order_depth.sell_orders[best_ask]
+
 
         position = state.position.get(self.symbol, 0)
         fair_value = self.calculate_fair_value(order_depth)
 
+    
         vol_10 = self.calculator.calculate_volatility(list(self.fair_value_history), 10)
 
+        logger.print("Current mode: ", self.current_mode)
         # Strategy 1: Market making
         if self.current_mode == "market_making":
-            if len(self.fair_value_ma120_history) < 120 or abs(
-                    fair_value - self.fair_value_ma120_history[-1]) <= self.band_width:
+            if len(self.fair_value_ma200_history) < 200 or abs(fair_value - self.fair_value_ma200_history[-1]) <= self.band_width:
                 orders = []
                 # 获取当前市场数据
                 order_depth = state.order_depths[self.symbol]
                 current_position = state.position.get(self.symbol, 0)
                 max_position = self.position_limit
+                logger.print(f"fair_value: {fair_value}, current_position: {current_position}, max_position: {max_position}")
 
                 if len(self.fair_value_history) >= self.trend_window:
                     window_data = list(self.fair_value_history)[-self.trend_window:]
@@ -604,9 +610,11 @@ class SquidInkStrategy(Strategy):
                 else:
                     fair_value = self.calculate_fair_value(order_depth)
                     self.ma_short = fair_value
+                logger.print(f"ma_short: {self.ma_short}")
 
                 available_buy = max(0, max_position - current_position)
                 available_sell = max(0, max_position + current_position)
+                logger.print(f"available_buy: {available_buy}, available_sell: {available_sell}")
 
                 # 处理卖单（asks）的限价单
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
@@ -615,6 +623,7 @@ class SquidInkStrategy(Strategy):
                         if quantity > 0:
                             orders.append(Order(self.symbol, ask_price, quantity))
                             available_buy -= quantity
+                            logger.print(f"buy {quantity} at {ask_price}")
 
                 # 处理买单（bids）的限价单
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
@@ -623,6 +632,7 @@ class SquidInkStrategy(Strategy):
                         if quantity > 0:
                             orders.append(Order(self.symbol, bid_price, -quantity))
                             available_sell -= quantity
+                            logger.print(f"sell {quantity} at {bid_price}")
 
                 # 挂出被动做市单
                 fair_value = self.ma_short
@@ -630,28 +640,32 @@ class SquidInkStrategy(Strategy):
                 # 计算挂单价格
                 buy_price = math.floor(fair_value - self.take_spread)
                 sell_price = math.ceil(fair_value + self.take_spread)
+                logger.print(f"take_spread: {self.take_spread}, buy_price: {buy_price}, sell_price: {sell_price}")
 
                 # 确保不超过仓位限制
                 if available_buy > 0:
                     orders.append(Order(self.symbol, buy_price, available_buy))
+                    logger.print(f"take_spread, buy {available_buy} at {buy_price}")
+
                 if available_sell > 0:
                     orders.append(Order(self.symbol, sell_price, -available_sell))
+                    logger.print(f"take_spread, sell {available_sell} at {sell_price}")
 
                 return orders
 
-            elif all(x != 0 for x in self.fair_value_ma120_history):
-                logger.print(f"Break! {fair_value}")
+            elif all(x != 0 for x in self.fair_value_ma200_history):
                 self.breakout_price = fair_value
                 self.breakout_times += 1
-                # 反向吃满
-                direction = 1 if fair_value - self.fair_value_ma120_history[-1] else -1  # 记录突破方向
+                #反向吃满
+                direction = 1 if fair_value - self.fair_value_ma200_history[-1] else -1 #记录突破方向
+                logger.print(f"Break! Breakout price: {self.breakout_price} Break direction {direction}")
 
                 if direction == 1:
-                    # 突破是向上的，先做多
+                    #突破是向上的，先做多
                     max_amount = min(best_ask_amount, self.position_limit - position)
                     orders.append(Order(self.symbol, best_ask - 1, max_amount))
                 if direction == -1:
-                    # 突破是向下的，先做空
+                    #突破是向下的，先做空
                     max_amount = min(-best_bid_amount, position - self.position_limit)
                     orders.append(Order(self.symbol, best_bid + 1, -max_amount))
 
@@ -660,22 +674,22 @@ class SquidInkStrategy(Strategy):
         # Strategy 2: Breakout
         elif self.current_mode == "trend_following" and self.breakout_price is not None:
             distance = fair_value - self.breakout_price
-            direction = 1 if distance > 0 else -1  # 往上突破为1 往下突破为0
+            direction = 1 if distance > 0 else -1 #往上突破为1 往下突破为0
 
-            # 先检查仓位有没有反向吃满，如果没有则先吃满
+            #先检查仓位有没有反向吃满，如果没有则先吃满
             if position * direction < self.position_limit:
-                # 继续下单
+                #继续下单
                 if direction == 1:
-                    # 突破是向上的，先做多
+                    #突破是向上的，先做多
                     max_amount = min(best_ask_amount, self.position_limit - position)
                     orders.append(Order(self.symbol, best_ask - 1, max_amount))
                 if direction == -1:
-                    # 突破是向下的，先做空
+                    #突破是向下的，先做空
                     max_amount = min(-best_bid_amount, position - self.position_limit)
                     orders.append(Order(self.symbol, best_bid + 1, -max_amount))
-
+            
             else:
-                # 只有吃满了仓位才开始反转
+                #只有吃满了仓位才开始反转
                 target_position = -direction * self.position_limit
                 delta_position = target_position - position
 
@@ -683,24 +697,26 @@ class SquidInkStrategy(Strategy):
                 if delta_position != 0:
                     res_position = self.position_limit - position if direction == 1 else position + self.position_limit
                     amount = min(abs(distance) * direction * delta_position / self.max_deviation, res_position)
-                    # 注意amount已经包括了direction
+                    #注意amount已经包括了direction
                     if direction == 1:
                         orders.append(Order(self.symbol, best_ask - 1, amount))
                     if direction == -1:
                         orders.append(Order(self.symbol, best_bid + 1, amount))
+                
 
             # 回归就清仓
-            if abs(fair_value - self.breakout_price) < vol_10 * 0.5:
+            logger.print(f"Current distance: {(fair_value - self.breakout_price) * direction}, distance_threshold: {vol_10 * 0.1}")
+            if (fair_value - self.breakout_price) * direction < vol_10 * 0.1:
                 logger.print(f"Fall back! {fair_value}")
                 if position != 0:
                     logger.print(f"Close position {position}")
                     if direction == 1:
-                        # 突破是向上的，平空
+                        #突破是向上的，平空
                         max_amount = min(best_bid_amount, -position)
                         orders.append(Order(self.symbol, best_bid + 1, max_amount))
-
+        
                     if direction == -1:
-                        # 突破是向下的，平多
+                        #突破是向下的，平多
                         max_amount = min(best_ask_amount, position)
                         orders.append(Order(self.symbol, best_ask - 1, -max_amount))
 
@@ -720,41 +736,38 @@ class SquidInkStrategy(Strategy):
         if len(self.fair_value_history) > self.ma_window:
             self.fair_value_history.popleft()
 
-        fair_value_ma120 = self.calculator.calculate_ma(list(self.fair_value_history), 120) if len(
-            self.fair_value_history) >= 120 else 0
-        self.fair_value_ma120_history.append(fair_value_ma120)
-        if len(self.fair_value_ma120_history) > self.ma_window:
-            self.fair_value_ma120_history.popleft()
-
+        fair_value_ma200 = self.calculator.calculate_ma(list(self.fair_value_history), 200) if len(self.fair_value_history) >= 200 else 0
+        self.fair_value_ma200_history.append(fair_value_ma200)
+        if len(self.fair_value_ma200_history) > self.ma_window:
+            self.fair_value_ma200_history.popleft()
+        
         pass
-
 
 class Config:
     def __init__(self):
         self.PRODUCT_CONFIG = {
-            "KELP": {
-                "strategy_cls": KelpStrategy,
-                "position_limit": 50,
-                "alpha": 0,
-                "beta": 0
-            },
-            "RAINFOREST_RESIN": {
-                "strategy_cls": RainforestResinStrategy,
-                "position_limit": 50,  # 最大持仓
-                "base_offset": 3,  # 基础报价偏移
-                "level2spread": 8,  # spread超过这个值就用另一个offset
-            },
-            "SQUID_INK": {
-                "strategy_cls": SquidInkStrategy,
-                "position_limit": 50,  # 最大持仓量
-                "ma_window": 120,  # 计算均价的时长
-                "max_deviation": 200,  # 偏离标准距离（最大距离）
-                "band_width": 30,  # 波动率计算的宽度
-                "trend_window": 120,  # 趋势判断的时长
-                "take_spread": 10
-            }
+        "KELP": {
+            "strategy_cls": KelpStrategy,
+            "position_limit": 50,
+            "alpha": 0,
+            "beta": 0
+        },
+        "RAINFOREST_RESIN": {
+            "strategy_cls": RainforestResinStrategy,
+            "position_limit": 50,  # 最大持仓
+            "base_offset": 3,  # 基础报价偏移
+            "level2spread": 8,  # spread超过这个值就用另一个offset
+        },
+        "SQUID_INK": {
+            "strategy_cls": SquidInkStrategy,
+            "position_limit": 50,          # 最大持仓量
+            "ma_window": 200,          # 计算均价的时长
+            "max_deviation": 200,       # 偏离标准距离（最大距离）      
+            "band_width": 30,          # 波动率计算的宽度
+            "trend_window": 100,       # 趋势判断的时长
+            "take_spread": 10
         }
-
+    }
 
 class Trader:
     def __init__(self, product_config=None):
@@ -784,7 +797,7 @@ class Trader:
             if product in state.order_depths:
                 product_orders, strategy_state = strategy.run(state)
                 orders[product] = product_orders
-
+                
                 new_trader_data[product] = strategy_state
 
         trader_data.update(new_trader_data)

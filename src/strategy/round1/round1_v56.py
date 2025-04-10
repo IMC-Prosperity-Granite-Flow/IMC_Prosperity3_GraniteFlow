@@ -546,6 +546,8 @@ class SquidInkStrategy(Strategy):
         self.breakout_price: Optional[float] = None
         self.prepared_reverse = False   #是否反向吃满了仓位准备跟踪趋势
         self.direction = 0
+
+        self.max_breakout_distance = 0
         
         self.ma_short = 0
 
@@ -583,15 +585,11 @@ class SquidInkStrategy(Strategy):
         buy_orders = [(p, v) for p, v in order_depth.buy_orders.items() if v > 0]
         sell_orders = [(p, v) for p, v in order_depth.sell_orders.items() if v > 0]
 
-        logger.print(f"Current Buy orders {buy_orders}")
-        logger.print(f"Current Sell orders {sell_orders}")
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
             
         best_bid_amount = order_depth.buy_orders[best_bid]
         best_ask_amount = order_depth.sell_orders[best_ask]
-        logger.print(f"best bid {best_bid}, best bid amount {best_bid_amount}, best ask {best_ask}, best ask amount {best_ask_amount}")
-
 
         position = state.position.get(self.symbol, 0)
         fair_value = self.calculate_fair_value(order_depth)
@@ -609,18 +607,17 @@ class SquidInkStrategy(Strategy):
                 order_depth = state.order_depths[self.symbol]
                 current_position = state.position.get(self.symbol, 0)
                 max_position = self.position_limit
-
-                
+                logger.print(f"fair_value: {fair_value}, current_position: {current_position}, max_position: {max_position}")
                 if len(self.fair_value_history) >= self.trend_window:
                     window_data = list(self.fair_value_history)[-self.trend_window:]
                     self.ma_short = np.mean(window_data)
                 else:
                     fair_value = self.calculate_fair_value(order_depth)
                     self.ma_short = fair_value
-
+                logger.print(f"ma_short: {self.ma_short}")
                 available_buy = max(0, max_position - current_position)
                 available_sell = max(0, max_position + current_position)
-
+                logger.print(f"available_buy: {available_buy}, available_sell: {available_sell}")
                 # 处理卖单（asks）的限价单
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
                     if ask_price < (self.ma_short - 10):
@@ -628,6 +625,7 @@ class SquidInkStrategy(Strategy):
                         if quantity > 0:
                             orders.append(Order(self.symbol, ask_price, quantity))
                             available_buy -= quantity
+                            logger.print(f"buy {quantity} at {ask_price}")
 
                 # 处理买单（bids）的限价单
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
@@ -636,6 +634,7 @@ class SquidInkStrategy(Strategy):
                         if quantity > 0:
                             orders.append(Order(self.symbol, bid_price, -quantity))
                             available_sell -= quantity
+                            logger.print(f"sell {quantity} at {bid_price}")
 
                 # 挂出被动做市单
                 fair_value = self.ma_short
@@ -643,12 +642,14 @@ class SquidInkStrategy(Strategy):
                 # 计算挂单价格
                 buy_price = math.floor(fair_value - self.take_spread)
                 sell_price = math.ceil(fair_value + self.take_spread)
-
+                logger.print(f"take_spread: {self.take_spread}, buy_price: {buy_price}, sell_price: {sell_price}")
                 # 确保不超过仓位限制
                 if available_buy > 0:
                     orders.append(Order(self.symbol, buy_price, available_buy))
+                    logger.print(f"take_spread, buy {available_buy} at {buy_price}")
                 if available_sell > 0:
                     orders.append(Order(self.symbol, sell_price, -available_sell))
+                    logger.print(f"take_spread, sell {available_sell} at {sell_price}")
 
                 return orders
 
@@ -683,10 +684,15 @@ class SquidInkStrategy(Strategy):
         # Strategy 2: Breakout
         elif self.current_mode == "trend_following" and self.breakout_price is not None:
             distance = fair_value - self.breakout_price
-            position = state.position.get(self.symbol, 0)
-            #判断价格是否回归
+            #记录最大突破距离：
+            if abs(distance) > self.max_breakout_distance + 10:
+                self.max_breakout_distance = abs(distance)
 
-            # 回归就清仓
+            position = state.position.get(self.symbol, 0)
+
+            #判断价格是否回归
+            logger.print(f"Current distance: {(fair_value - self.breakout_price) * self.direction}, distance_threshold: {vol_10 * 0.1}")
+            # 回归就开始清仓
             if (fair_value - self.breakout_price) * self.direction < 0:
                 logger.print(f"Fall back! {fair_value}")
                 self.current_mode = "closing_position"
@@ -714,14 +720,13 @@ class SquidInkStrategy(Strategy):
                     self.breakout_price = None
                     self.prepared_reverse = False
                     self.direction = 0
+                    self.max_breakout_distance = 0
                     self.current_mode = "market_making"
 
             #如果没有回归，吃回调
             else:
                 #先检查仓位有没有反向吃满，如果没有则先吃满。注意只能做一次，不然会反复反向吃满
                 if position * self.direction < self.position_limit and not self.prepared_reverse:
-                    #继续下单
-                    #反向吃满
                     logger.print(f"Preparing reverse, current position {position}, direction {self.direction}")
                     logger.print(f"{self.position_limit - position} to fill")
                     if self.direction == 1:
@@ -747,7 +752,7 @@ class SquidInkStrategy(Strategy):
                     delta_position = target_position - position #还要做多少仓位才到顶
                     
                     current_position = state.position.get(self.symbol, 0)
-                    if delta_position != 0:
+                    if delta_position != 0 and abs(distance) >= self.max_breakout_distance: #只有当价格突破新高(10)的时候才下单
                         res_position = self.position_limit - position if self.direction == 1 else position + self.position_limit
                         amount = min(abs(distance) * self.direction * delta_position / self.max_deviation, res_position)
                         #注意amount已经包括了direction
@@ -761,15 +766,21 @@ class SquidInkStrategy(Strategy):
 
             if position != 0:
                 logger.print(f"Close position {position}")
-                if self.direction == 1:
-                    #突破是向上的，平空
-                    max_amount = min(best_bid_amount, -position)
-                    orders.append(Order(self.symbol, best_bid + 1, max_amount))
+                if position > 0:
+                    #卖出，平多
+                    for price, amount in sorted(order_depth.sell_orders.items()):
+                        max_amount = min(-amount, position)
+                        if max_amount > 0:
+                            orders.append(Order(self.symbol, price, -max_amount))
+                            logger.print(f"Closing position, sell {max_amount} at {price}")
         
-                if self.direction == -1:
-                    #突破是向下的，平多
-                    max_amount = min(best_ask_amount, position)
-                    orders.append(Order(self.symbol, best_ask - 1, -max_amount))
+                if position < 0:
+                    #买入平空
+                    for price, amount in sorted(order_depth.buy_orders.items()):
+                        max_amount = min(amount,  - position)
+                        if max_amount > 0:
+                            orders.append(Order(self.symbol, price, max_amount))
+                            logger.print(f"Up break, buy {max_amount} at {price}")
 
             if position == 0:
                 logger.print(f"Back to market making mode")
@@ -777,6 +788,7 @@ class SquidInkStrategy(Strategy):
                 self.breakout_price = None
                 self.prepared_reverse = False
                 self.direction = 0
+                self.max_breakout_distance = 0
                 self.current_mode = "market_making"
 
         return orders
