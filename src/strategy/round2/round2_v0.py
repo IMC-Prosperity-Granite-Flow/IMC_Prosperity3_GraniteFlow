@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import List, Any, Dict, List, Optional, Tuple, Deque
+from typing import List, Any, Dict, List, Optional, Tuple, Deque, Type
 import numpy as np
 import json
 import jsonpickle
@@ -672,36 +672,265 @@ class SquidInkStrategy(Strategy):
 
 
 
-# 组合策略
+# PICNIC_BASKET组合策略
 class BasketStrategy(Strategy):
-    def __init__(self, main_symbol: str, symbols: List[str], position_limits: dict):
-        super().__init__(main_symbol, position_limits[main_symbol])
+    def __init__(self, symbols: List[str], position_limits: dict,  # 移除了main_symbol参数
+                delta1_threshold: float, delta2_threshold: float, 
+                time_window: int = 100):
+        # 使用第一个symbol作为虚拟主产品
+        super().__init__(symbols[0], position_limits[symbols[0]])
+        
         self.symbols = symbols
         self.position_limits = position_limits
 
-    # 处理CROISSANT
-    def generate_orders_croissant(self, state: TradingState) -> List[Order]:
-        orders = []
-
-    #其他产品类似
+        self.delta1_threshold = delta1_threshold
+        self.delta2_threshold = delta2_threshold
+        self.time_window = time_window
         
+        #记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
+        self.position_history = {symbol: [] for symbol in self.symbols}
+        #记录fair_value历史
+        
+        self.fair_value_history = {symbol: [] for symbol in self.symbols}
+
+    #——————工具函数——————
+
+    def calculate_fair_value(self, order_depth):
+        """使用买卖加权的price计算fair_value"""
+        def weighted_avg(prices_vols, n=3):
+            total_volume = 0
+            price_sum = 0
+            # 按价格排序（买单调降序，卖单调升序）
+            sorted_orders = sorted(prices_vols.items(),
+                                   key=lambda x: x[0],
+                                   reverse=isinstance(prices_vols, dict))
+
+            # 取前n档或全部可用档位
+            for price, vol in sorted_orders[:n]:
+                abs_vol = abs(vol)
+                price_sum += price * abs_vol
+                total_volume += abs_vol
+            return price_sum / total_volume if total_volume > 0 else 0
+
+        # 计算买卖方加权均价
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+
+        # 返回中间价
+        return (buy_avg + sell_avg) / 2
+        
+    def quick_trade(self, symbol: str, state: TradingState, amount: int) -> Tuple[list, int]:
+        """
+        快速交易函数：
+        给定商品名和所需数量(amount)，正数代表买入，负数代表卖出
+        返回尽可能的最佳orders和剩余数量
+        """
+        orders = []
+        order_depth = state.order_depths[symbol]
+        position = state.position.get(symbol, 0)
+        
+        if amount > 0:
+            for price, sell_amount in sorted(order_depth.sell_orders.items()):
+                max_amount = min(-sell_amount, self.position_limits[symbol] - position, amount)
+                if max_amount > 0:
+                    orders.append(Order(symbol, price, max_amount))
+                    position += max_amount
+                    amount -= max_amount
+                if amount == 0:
+                    break
+
+        elif amount < 0 :
+            for price, buy_amount in sorted(order_depth.buy_orders.items()):
+                max_amount = min(buy_amount, position - self.position_limits[symbol], -amount)
+                if max_amount > 0:
+                    #卖出
+                    orders.append(Order(symbol, price, -max_amount))
+                    position -= max_amount
+                    amount += max_amount
+                if amount == 0:
+                    break
+        
+        return orders, amount
+
+    def get_price_delta_basket1(self, state: TradingState) -> float:
+        """
+        返回PICNIC_BASKET1和其组分的价差：
+        delta = basket1 - composition
+        """
+        logger.print(state.order_depths)
+        basket1_order_depths = state.order_depths['PICNIC_BASKET1']
+        croissants_order_depths = state.order_depths['CROISSANTS']
+        jams_order_depths = state.order_depths['JAMS']
+        djembes_order_depths = state.order_depths['DJEMBES']
+
+        basket1_fair_value = self.calculate_fair_value(basket1_order_depths)
+        croissants_fair_value = self.calculate_fair_value(croissants_order_depths)
+        jams_fair_value = self.calculate_fair_value(jams_order_depths)
+        djembes_fair_value = self.calculate_fair_value(djembes_order_depths)
+
+        delta = basket1_fair_value - 6 * croissants_fair_value - 3 * jams_fair_value - 1 * djembes_fair_value
+        return delta
+        
+    def get_price_delta_basket2(self, state: TradingState) -> float:
+        """
+        返回PICNIC_BASKET2和其组分的价差：
+        delta = basket1 - composition
+        """
+        basket2_order_depths = state.order_depths['PICNIC_BASKET2']
+        croissants_order_depths = state.order_depths['CROISSANTS']
+        jams_order_depths = state.order_depths['JAMS']
+
+        basket2_fair_value = self.calculate_fair_value(basket2_order_depths)
+        croissants_fair_value = self.calculate_fair_value(croissants_order_depths)
+        jams_fair_value = self.calculate_fair_value(jams_order_depths)
+
+        delta = basket2_fair_value - 4 * croissants_fair_value - 2 * jams_fair_value
+
+        return delta
+        
+    #线性规划得出最佳basket1, basket2下单数
+    def compute_feasible_arbitrage(
+        self, state,
+        spread1: float,
+        spread2: float,
+    ) -> Tuple[int, int]:
+        """
+        输入state, 价差spread1, 价差spread2。定义为price_basket - price_set
+        返回最佳basket1, basket2下单数
+        """
+        search_range1 = self.position_limits['PICNIC_BASKET1']
+        search_range2 = self.position_limits['PICNIC_BASKET2']
+
+        x1_vals = np.arange(-search_range1, search_range1 + 1)
+        x2_vals = np.arange(-search_range2, search_range2 + 1)
+        x1_grid, x2_grid = np.meshgrid(x1_vals, x2_vals, indexing='ij')
+
+        # 计算 delta
+        delta_CROISSANTS = -6 * x1_grid - 4 * x2_grid
+        delta_JAMS = -3 * x1_grid - 2 * x2_grid
+        delta_DJEMBE = -1 * x1_grid
+        delta_BASKET1 = x1_grid
+        delta_BASKET2 = x2_grid
+
+        # 当前仓位
+        get_pos = lambda p: state.position.get(p, 0)
+        limit = self.position_limits
+
+        # 检查合法性，返回布尔矩阵
+        def is_valid(delta, pos, lim):
+            max_buy = lim - pos
+            max_sell = pos + lim
+            return (delta <= max_buy) & (delta >= -max_sell)
+
+        mask = (
+            is_valid(delta_CROISSANTS, get_pos("CROISSANTS"), limit["CROISSANTS"]) &
+            is_valid(delta_JAMS, get_pos("JAMS"), limit["JAMS"]) &
+            is_valid(delta_DJEMBE, get_pos("DJEMBE"), limit["DJEMBE"]) &
+            is_valid(delta_BASKET1, get_pos("PICNIC_BASKET1"), limit["PICNIC_BASKET1"]) &
+            is_valid(delta_BASKET2, get_pos("PICNIC_BASKET2"), limit["PICNIC_BASKET2"])
+        )
+
+        # 计算 score
+        score = -spread1 * x1_grid - spread2 * x2_grid
+        score_masked = np.where(mask, score, -np.inf)
+
+        # 找到最大值的位置
+        idx = np.unravel_index(np.argmax(score_masked), score_masked.shape)
+        best_x1 = x1_grid[idx]
+        best_x2 = x2_grid[idx]
+
+        return int(best_x1), int(best_x2)
+
+
+
+    #———————下单模块——————
+
+
+
+    def generate_orders_basket1(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int) -> List[Order]:
+        orders = []
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, pairing_amount1)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
+        return orders
+
+    def generate_orders_basket2(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int) -> List[Order]:
+        orders = []
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, pairing_amount2)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
+        return orders
+
+    
+    def generate_orders_croissant(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int) -> List[Order]:
+        orders = []
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, - 6 * pairing_amount1 - 4 * pairing_amount2)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
+        return orders
+        
+    def generate_orders_jams(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int) -> List[Order]:
+        orders = []
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, - 3 * pairing_amount1 - 2 * pairing_amount2)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
+        return orders
+        
+    def generate_orders_djembes(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int) -> List[Order]:
+        orders = []
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, - 1 * pairing_amount1)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
+        return orders
+            
     def generate_orders(self, state: TradingState) -> Dict[Symbol, List[Order]]:
         orders = {}
         strategy_map = {
-        'CROISSANT': self.generate_orders_croissant,
-        'RAINFOREST_RESIN': self.generate_orders_resin,
-        'KELP': self.generate_orders_kelp,
-        # 添加其他产品映射...
-    }
+            'PICNIC_BASKET1': self.generate_orders_basket1,
+            'PICNIC_BASKET2': self.generate_orders_basket2,
+            'CROISSANTS': self.generate_orders_croissant,
+            'JAMS': self.generate_orders_jams, 
+            'DJEMBES': self.generate_orders_djembes,
+        }   
+            
+        #获取两个品种的价差，计算仓位分配比例
+        delta1 = self.get_price_delta_basket1(state)
+        delta2 = self.get_price_delta_basket2(state)
+        
+
+        #—————————————————————待添加价差过滤条件—————————————————————————#
+        if abs(delta1) < self.delta1_threshold:
+            delta1 = 0
+        
+        if abs(delta2) < self.delta2_threshold:
+            delta2 = 0
+            
+        # 计算仓位分配比例
+        
+        pairing_amount1, pairing_amount2 = self.compute_feasible_arbitrage(state, delta1, delta2)
+
+
         # 遍历处理所有相关产品
         for symbol in self.symbols:
             if symbol in state.order_depths:
-                # 具体订单生成逻辑
-                order_depth = state.order_depths[symbol]
-                position = state.position.get(symbol, 0)
                 # 生成该symbol的订单...
-                handler = strategy_map.get(symbol, self.generate_default_orders)
-                orders[symbol] = handler(state, symbol)
+                handler = strategy_map.get(symbol)
+                orders[symbol] = handler(symbol, state, pairing_amount1, pairing_amount2)
 
         return orders
 
@@ -709,14 +938,37 @@ class BasketStrategy(Strategy):
         orders = self.generate_orders(state)
         strategy_state = self.save_state(state)
         return orders, strategy_state
+        
+    def save_history(self, symbol: str, state: TradingState):
+        """
+        保存该产品的历史数据
+        """
+        order_depth = state.order_depths[symbol]
+        position = state.position.get(symbol, 0)
+        fair_value = self.calculate_fair_value(order_depth)
+
+        self.position_history[symbol].append(position)
+        self.fair_value_history[symbol].append(fair_value)
+
+        if len(self.position_history[symbol]) > self.time_window:
+            self.position_history[symbol] = self.position_history[symbol][-self.time_window:]
+
+        if len(self.fair_value_history[symbol]) > self.time_window:
+            self.fair_value_history[symbol] = self.fair_value_history[symbol][-self.time_window:]
+
+        return
     
     def save_state(self, state):
+        #对每个产品维护历史数据          
+        for symbol in self.symbols:
+            if symbol in state.order_depths:
+                self.save_history(symbol, state)
+                        
         return super().save_state(state)
-    
+        
     def load_state(self, state):
         return super().load_state(state)
-    
-    
+        
 
 
 class Config:
@@ -724,18 +976,21 @@ class Config:
         self.PRODUCT_CONFIG = {
         "KELP": {
             "strategy_cls": KelpStrategy,
+            "symbol": "KELP",
             "position_limit": 50,
             "alpha": 0,
             "beta": 0
         },
         "RAINFOREST_RESIN": {
             "strategy_cls": RainforestResinStrategy,
+            "symbol": "RAINFOREST_RESIN",
             "position_limit": 50,  # 最大持仓
             "base_offset": 3,  # 基础报价偏移
             "level2spread": 8,  # spread超过这个值就用另一个offset
         },
         "SQUID_INK": {
             "strategy_cls": SquidInkStrategy,
+            "symbol": "SQUID_INK",
             "position_limit": 50,          # 最大持仓量
             "ma_window": 200,          # 计算均价的时长
             "max_deviation": 200,       # 偏离标准距离（最大距离）      
@@ -745,36 +1000,22 @@ class Config:
             "break_step": 15,           #price range to next reverse order
             "fallback_threshold": 0,   #price range to fall back * vol_10
         },
-        "BASKET": {
+        "PICNIC_BASKET_GROUP": {
             "strategy_cls": BasketStrategy,
-            "sub_products": ["BASKET1", "BASKET2", "CROISSANT", "JAM", "DJEMBE"],
-            "basket1_position_limit": 60,
-            "basket2_position_limit": 100,
-            "cross_position_limit": 50,
-            "croissant_position_limit": 50, 
-            "jam_position_limit": 350,
-            "djembe_position_limit": 60,
-        },
+            "symbols": ["PICNIC_BASKET1", "PICNIC_BASKET2", "CROISSANTS", "JAMS", "DJEMBE"],
+            "position_limits": {
+                "PICNIC_BASKET1": 60,
+                "PICNIC_BASKET2": 100,
+                "CROISSANTS": 250,
+                "JAMS": 350,
+                "DJEMBE": 60
+            },
+            "delta1_threshold": 10,
+            "delta2_threshold": 10,
+            "time_window": 100
+        }
     }
         
-
-class Trader:
-    def _init_strategies(self):
-        for product, config in self.PRODUCT_CONFIG.items():
-            if "sub_products" in config:  # 处理组合产品
-                strategy = config["strategy_cls"](
-                    main_symbol=product,
-                    symbols=[product] + config["sub_products"],
-                    **config
-                )
-                # 注册主产品和所有子产品
-                for symbol in [product] + config["sub_products"]:
-                    self.strategies[symbol] = strategy
-            else:
-                # 常规产品初始化
-                cls = config["strategy_cls"]
-                args = {k:v for k,v in config.items() if k != "strategy_cls"}
-                self.strategies[product] = cls(symbol=product, **args)
 
 class Trader:
     def __init__(self, product_config=None):
@@ -784,11 +1025,17 @@ class Trader:
         self._init_strategies()
 
     def _init_strategies(self):
-        config = Config()
         for product, config in self.PRODUCT_CONFIG.items():
-            cls = config["strategy_cls"]
-            args = {k: v for k, v in config.items() if k != "strategy_cls"}
-            self.strategies[product] = cls(symbol=product, **args)
+            if product == "PICNIC_BASKET_GROUP":
+                cls = config["strategy_cls"]
+                args = {k:v for k,v in config.items() if k != "strategy_cls" and k != "symbols"}
+                self.strategies[product] = cls(symbols=config["symbols"], **args)
+        
+            else:
+                # 常规产品初始化保持不变
+                cls = config["strategy_cls"]
+                args = {k:v for k,v in config.items() if k != "strategy_cls"}
+                self.strategies[product] = cls(**args)
 
     def run(self, state: TradingState):
         conversions = 0
@@ -797,13 +1044,26 @@ class Trader:
 
         orders = {}
         new_trader_data = {}
-
+        product_list = [product for product, strategy in self.strategies.items()]
         for product, strategy in self.strategies.items():
-            if product in trader_data:
+            if product in trader_data or product == "PICNIC_BASKET_GROUP":
                 strategy.load_state(state)
-            if product in state.order_depths:
+            if product in state.order_depths or product == "PICNIC_BASKET_GROUP":
+                logger.print(f"Running strategy for {product}...")
                 product_orders, strategy_state = strategy.run(state)
-                orders[product] = product_orders
+                #处理basket订单（包括basket1, basket2, croissants, jams, djembes）
+                if isinstance(product_orders, dict):
+                    logger.print("Processing basket orders...")
+                    for symbol, symbol_orders in product_orders.items():
+                        logger.print(f"Processing orders for {symbol}...")
+                        if symbol not in orders:
+                            logger.print(f"Creating new order list for {symbol}...")
+                            orders[symbol] = []
+                        orders[symbol].extend(symbol_orders)
+                        logger.print(f"Added {len(symbol_orders)} orders for {symbol}.")
+                else:
+                    logger.print(f"Processing {product} orders...")
+                    orders[product] = product_orders
                 
                 new_trader_data[product] = strategy_state
 
