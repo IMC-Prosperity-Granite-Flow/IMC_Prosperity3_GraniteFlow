@@ -281,7 +281,7 @@ class KelpStrategy(Strategy):
         super().__init__(symbol, position_limit)
         # 添加海带策略特有参数
         self.alpha = alpha  # adjusted fair price清仓系数
-        self.alpha = beta  # adjusted fair price订单簿不平衡度系数
+        self.beta = beta  # adjusted fair price订单簿不平衡度系数
         self.trader_data = {}
         self.position_history = []
 
@@ -751,7 +751,7 @@ class SquidInkStrategy(Strategy):
                     current_position = state.position.get(self.symbol, 0)
                     if delta_position != 0 and abs(distance) >= self.max_breakout_distance: #只有当价格突破新高(10)的时候才下单
                         res_position = self.position_limit - position if self.direction == 1 else position + self.position_limit
-                        amount = min(int(abs(distance) * self.direction * delta_position / self.max_deviation), res_position)
+                        amount = min(abs(distance) * self.direction * delta_position / self.max_deviation, res_position)
                         #注意amount已经包括了direction
                         if self.direction == 1:
                             orders.append(Order(self.symbol, best_ask - 1, amount))
@@ -799,7 +799,7 @@ class Config:
             "trend_window": 100,       # 趋势判断的时长
             "take_spread": 10,          #market making mode take width
             "break_step": 15,           #price range to next reverse order
-            "fallback_threshold": 0,   #price range to fall back * vol_10
+            "fallback_threshold": 2,   #price range to fall back * vol_10
         }
     }
 
