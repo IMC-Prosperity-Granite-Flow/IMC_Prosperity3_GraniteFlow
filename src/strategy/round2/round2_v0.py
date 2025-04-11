@@ -8,6 +8,8 @@ import math
 from collections import deque
 
 
+
+
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
@@ -668,95 +670,53 @@ class SquidInkStrategy(Strategy):
         pass
 
 
-class Basket1Strategy(Strategy):
-    def __init__(self, symbol: str, position_limit: int):
-        super().__init__(symbol, position_limit)
-    
-    def calculate_fair_value(self, order_depth):
-        return super().calculate_fair_value(order_depth)
-    
-    def generate_orders(self, state) -> List[Order]:
-        orders = []
-        return orders 
-    
-    def save_state(self, state):
-        return super().save_state(state)
-    
-    def load_state(self, state):
-        super().load_state(state)
-        pass
 
-class Basket2Strategy(Strategy):
-    def __init__(self, symbol: str, position_limit: int):
-        super().__init__(symbol, position_limit)
-    
-    def calculate_fair_value(self, order_depth):
-        return super().calculate_fair_value(order_depth)
-    
-    def generate_orders(self, state) -> List[Order]:
-        orders = []
-        return orders 
-    
-    def save_state(self, state):
-        return super().save_state(state)
-    
-    def load_state(self, state):
-        super().load_state(state)
-        pass
 
-class CroissantStrategy(Strategy):
-    def __init__(self, symbol: str, position_limit: int):
-        super().__init__(symbol, position_limit)
-    
-    def calculate_fair_value(self, order_depth):
-        return super().calculate_fair_value(order_depth)
-    
-    def generate_orders(self, state) -> List[Order]:
-        orders = []
-        return orders 
-    
-    def save_state(self, state):
-        return super().save_state(state)
-    
-    def load_state(self, state):
-        super().load_state(state)
-        pass
+# 组合策略
+class BasketStrategy(Strategy):
+    def __init__(self, main_symbol: str, symbols: List[str], position_limits: dict):
+        super().__init__(main_symbol, position_limits[main_symbol])
+        self.symbols = symbols
+        self.position_limits = position_limits
 
-class JamStrategy(Strategy):
-    def __init__(self, symbol: str, position_limit: int):
-        super().__init__(symbol, position_limit)
-    
-    def calculate_fair_value(self, order_depth):
-        return super().calculate_fair_value(order_depth)
-    
-    def generate_orders(self, state) -> List[Order]:
+    # 处理CROISSANT
+    def generate_orders_croissant(self, state: TradingState) -> List[Order]:
         orders = []
-        return orders 
-    
-    def save_state(self, state):
-        return super().save_state(state)
-    
-    def load_state(self, state):
-        super().load_state(state)
-        pass
 
-class DjembeStrategy(Strategy):
-    def __init__(self, symbol: str, position_limit: int):
-        super().__init__(symbol, position_limit)
-    
-    def calculate_fair_value(self, order_depth):
-        return super().calculate_fair_value(order_depth)
-    
-    def generate_orders(self, state) -> List[Order]:
-        orders = []
-        return orders 
+    #其他产品类似
+        
+    def generate_orders(self, state: TradingState) -> Dict[Symbol, List[Order]]:
+        orders = {}
+        strategy_map = {
+        'CROISSANT': self.generate_orders_croissant,
+        'RAINFOREST_RESIN': self.generate_orders_resin,
+        'KELP': self.generate_orders_kelp,
+        # 添加其他产品映射...
+    }
+        # 遍历处理所有相关产品
+        for symbol in self.symbols:
+            if symbol in state.order_depths:
+                # 具体订单生成逻辑
+                order_depth = state.order_depths[symbol]
+                position = state.position.get(symbol, 0)
+                # 生成该symbol的订单...
+                handler = strategy_map.get(symbol, self.generate_default_orders)
+                orders[symbol] = handler(state, symbol)
+
+        return orders
+
+    def run(self, state: TradingState) -> Tuple[Dict[Symbol, List[Order]], dict]:
+        orders = self.generate_orders(state)
+        strategy_state = self.save_state(state)
+        return orders, strategy_state
     
     def save_state(self, state):
         return super().save_state(state)
     
     def load_state(self, state):
-        super().load_state(state)
-        pass
+        return super().load_state(state)
+    
+    
 
 
 class Config:
@@ -785,28 +745,37 @@ class Config:
             "break_step": 15,           #price range to next reverse order
             "fallback_threshold": 0,   #price range to fall back * vol_10
         },
-        "BASKET1": {
-            "strategy_cls": Basket1Strategy,
-            "position_limit": 60,
+        "BASKET": {
+            "strategy_cls": BasketStrategy,
+            "sub_products": ["BASKET1", "BASKET2", "CROISSANT", "JAM", "DJEMBE"],
+            "basket1_position_limit": 60,
+            "basket2_position_limit": 100,
+            "cross_position_limit": 50,
+            "croissant_position_limit": 50, 
+            "jam_position_limit": 350,
+            "djembe_position_limit": 60,
         },
-        "BASKET2": {
-            "strategy_cls": Basket2Strategy,
-            "position_limit": 100,
-        },
-        "CROISSANT":{
-            "strategy_cls": CroissantStrategy,
-            "position_limit": 50,
-        },
-        "JAM":{
-            "strategy_cls": JamStrategy,
-            "position_limit": 350,
-        },
-        "DJEMBE":{
-            "strategy_cls": DjembeStrategy,
-            "position_limit" : 60,
-        }
     }
         
+
+class Trader:
+    def _init_strategies(self):
+        for product, config in self.PRODUCT_CONFIG.items():
+            if "sub_products" in config:  # 处理组合产品
+                strategy = config["strategy_cls"](
+                    main_symbol=product,
+                    symbols=[product] + config["sub_products"],
+                    **config
+                )
+                # 注册主产品和所有子产品
+                for symbol in [product] + config["sub_products"]:
+                    self.strategies[symbol] = strategy
+            else:
+                # 常规产品初始化
+                cls = config["strategy_cls"]
+                args = {k:v for k,v in config.items() if k != "strategy_cls"}
+                self.strategies[product] = cls(symbol=product, **args)
+
 class Trader:
     def __init__(self, product_config=None):
         # 使用默认 config，或外部传入 config
