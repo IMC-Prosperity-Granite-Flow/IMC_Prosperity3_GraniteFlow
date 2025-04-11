@@ -667,6 +667,98 @@ class SquidInkStrategy(Strategy):
         
         pass
 
+
+class Basket1Strategy(Strategy):
+    def __init__(self, symbol: str, position_limit: int):
+        super().__init__(symbol, position_limit)
+    
+    def calculate_fair_value(self, order_depth):
+        return super().calculate_fair_value(order_depth)
+    
+    def generate_orders(self, state) -> List[Order]:
+        orders = []
+        return orders 
+    
+    def save_state(self, state):
+        return super().save_state(state)
+    
+    def load_state(self, state):
+        super().load_state(state)
+        pass
+
+class Basket2Strategy(Strategy):
+    def __init__(self, symbol: str, position_limit: int):
+        super().__init__(symbol, position_limit)
+    
+    def calculate_fair_value(self, order_depth):
+        return super().calculate_fair_value(order_depth)
+    
+    def generate_orders(self, state) -> List[Order]:
+        orders = []
+        return orders 
+    
+    def save_state(self, state):
+        return super().save_state(state)
+    
+    def load_state(self, state):
+        super().load_state(state)
+        pass
+
+class CroissantStrategy(Strategy):
+    def __init__(self, symbol: str, position_limit: int):
+        super().__init__(symbol, position_limit)
+    
+    def calculate_fair_value(self, order_depth):
+        return super().calculate_fair_value(order_depth)
+    
+    def generate_orders(self, state) -> List[Order]:
+        orders = []
+        return orders 
+    
+    def save_state(self, state):
+        return super().save_state(state)
+    
+    def load_state(self, state):
+        super().load_state(state)
+        pass
+
+class JamStrategy(Strategy):
+    def __init__(self, symbol: str, position_limit: int):
+        super().__init__(symbol, position_limit)
+    
+    def calculate_fair_value(self, order_depth):
+        return super().calculate_fair_value(order_depth)
+    
+    def generate_orders(self, state) -> List[Order]:
+        orders = []
+        return orders 
+    
+    def save_state(self, state):
+        return super().save_state(state)
+    
+    def load_state(self, state):
+        super().load_state(state)
+        pass
+
+class DjembeStrategy(Strategy):
+    def __init__(self, symbol: str, position_limit: int):
+        super().__init__(symbol, position_limit)
+    
+    def calculate_fair_value(self, order_depth):
+        return super().calculate_fair_value(order_depth)
+    
+    def generate_orders(self, state) -> List[Order]:
+        orders = []
+        return orders 
+    
+    def save_state(self, state):
+        return super().save_state(state)
+    
+    def load_state(self, state):
+        super().load_state(state)
+        pass
+
+
 class Config:
     def __init__(self):
         self.PRODUCT_CONFIG = {
@@ -692,9 +784,29 @@ class Config:
             "take_spread": 10,          #market making mode take width
             "break_step": 15,           #price range to next reverse order
             "fallback_threshold": 0,   #price range to fall back * vol_10
+        },
+        "BASKET1": {
+            "strategy_cls": Basket1Strategy,
+            "position_limit": 60,
+        },
+        "BASKET2": {
+            "strategy_cls": Basket2Strategy,
+            "position_limit": 100,
+        },
+        "CROISSANT":{
+            "strategy_cls": CroissantStrategy,
+            "position_limit": 50,
+        },
+        "JAM":{
+            "strategy_cls": JamStrategy,
+            "position_limit": 350,
+        },
+        "DJEMBE":{
+            "strategy_cls": DjembeStrategy,
+            "position_limit" : 60,
         }
     }
-
+        
 class Trader:
     def __init__(self, product_config=None):
         # 使用默认 config，或外部传入 config
