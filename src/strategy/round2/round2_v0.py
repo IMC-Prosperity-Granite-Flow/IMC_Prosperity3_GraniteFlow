@@ -1008,10 +1008,10 @@ class Config:
                 "JAMS": 350,
                 "DJEMBES": 60
             },
-            "delta1_threshold_positive": 100,
-            "delta1_threshold_negative": -100,
-            "delta2_threshold_positive": 100,
-            "delta2_threshold_negative": -100,
+            "delta1_threshold_positive": 110,
+            "delta1_threshold_negative": -110,
+            "delta2_threshold_positive": 110,
+            "delta2_threshold_negative": -110,
             "time_window": 100
         }
     }
