@@ -778,7 +778,6 @@ class BasketStrategy(Strategy):
 
         return delta
         
-
     #线性规划得出最佳basket1, basket2下单数
     def compute_feasible_arbitrage(
         self, state,
@@ -810,17 +809,24 @@ class BasketStrategy(Strategy):
         limit = self.position_limits
 
         # 检查合法性，返回布尔矩阵
-        def is_valid(delta, pos, lim):
-            max_buy = lim - pos
-            max_sell = pos + lim
+        # 考虑 unhedged 仓位的影响
+        def is_valid(delta, pos, lim, symbol):
+            unhedged_amt = 0
+            if unhedged and symbol in unhedged:
+                unhedged_amt = abs(unhedged[symbol])  # 需要额外预留头寸
+
+            max_buy = lim - pos - unhedged_amt
+            max_sell = pos + lim - unhedged_amt
+
             return (delta <= max_buy) & (delta >= -max_sell)
 
+
         mask = (
-            is_valid(delta_CROISSANTS, get_pos("CROISSANTS"), limit["CROISSANTS"]) &
-            is_valid(delta_JAMS, get_pos("JAMS"), limit["JAMS"]) &
-            is_valid(delta_DJEMBES, get_pos("DJEMBES"), limit["DJEMBES"]) &
-            is_valid(delta_BASKET1, get_pos("PICNIC_BASKET1"), limit["PICNIC_BASKET1"]) &
-            is_valid(delta_BASKET2, get_pos("PICNIC_BASKET2"), limit["PICNIC_BASKET2"])
+            is_valid(delta_CROISSANTS, get_pos("CROISSANTS"), limit["CROISSANTS"], "CROISSANTS") &
+            is_valid(delta_JAMS, get_pos("JAMS"), limit["JAMS"], "JAMS") &
+            is_valid(delta_DJEMBES, get_pos("DJEMBES"), limit["DJEMBES"], "DJEMBES") &
+            is_valid(delta_BASKET1, get_pos("PICNIC_BASKET1"), limit["PICNIC_BASKET1"], "PICNIC_BASKET1") &
+            is_valid(delta_BASKET2, get_pos("PICNIC_BASKET2"), limit["PICNIC_BASKET2"], "PICNIC_BASKET2")
         )
 
         mask &= self.get_market_liquidity_limit("CROISSANTS", delta_CROISSANTS, state)
