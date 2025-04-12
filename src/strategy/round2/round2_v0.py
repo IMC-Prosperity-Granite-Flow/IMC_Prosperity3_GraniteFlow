@@ -675,7 +675,8 @@ class SquidInkStrategy(Strategy):
 # PICNIC_BASKET组合策略
 class BasketStrategy(Strategy):
     def __init__(self, symbols: List[str], position_limits: dict,  # 移除了main_symbol参数
-                delta1_threshold: float, delta2_threshold: float, 
+                delta1_threshold_positive: float, delta2_threshold_positive: float,
+                delta1_threshold_negative: float, delta2_threshold_negative: float, 
                 time_window: int = 100):
         # 使用第一个symbol作为虚拟主产品
         super().__init__(symbols[0], position_limits[symbols[0]])
@@ -683,8 +684,10 @@ class BasketStrategy(Strategy):
         self.symbols = symbols
         self.position_limits = position_limits
 
-        self.delta1_threshold = delta1_threshold
-        self.delta2_threshold = delta2_threshold
+        self.delta1_threshold_positive = delta1_threshold_positive
+        self.delta1_threshold_negative = delta1_threshold_negative
+        self.delta2_threshold_positive = delta2_threshold_positive
+        self.delta2_threshold_negative = delta2_threshold_negative
         self.time_window = time_window
         
         #记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
@@ -718,7 +721,32 @@ class BasketStrategy(Strategy):
 
         # 返回中间价
         return (buy_avg + sell_avg) / 2
-        
+    
+    def get_available_amount(self, symbol: str, state: TradingState) -> int:
+        """
+        返回市场上已有市价单的总数量
+        sell_amount, buy_amount（注意都为正数）
+        """
+        order_depth = state.order_depths[symbol]
+        sell_amount = -sum(order_depth.sell_orders.values())
+        buy_amount = sum(order_depth.buy_orders.values())
+        return sell_amount, buy_amount
+    
+    def get_market_liquidity_limit(self, symbol: str, delta: np.ndarray, state: TradingState) -> np.ndarray:
+        """
+        对 delta 添加市场流动性约束，返回一个布尔 mask。
+        正的 delta 表示买入，负的 delta 表示卖出。
+        """
+        sell_amount, buy_amount = self.get_available_amount(symbol, state)
+
+        # delta 为正（买入），不能超过 buy_amount
+        buy_mask = (delta <= buy_amount)
+        # delta 为负（卖出），不能超过 sell_amount
+        sell_mask = (-delta <= sell_amount)
+
+        return buy_mask & sell_mask
+    
+
     def quick_trade(self, symbol: str, state: TradingState, amount: int) -> Tuple[list, int]:
         """
         快速交易函数：
@@ -808,7 +836,7 @@ class BasketStrategy(Strategy):
         # 计算 delta
         delta_CROISSANTS = -6 * x1_grid - 4 * x2_grid
         delta_JAMS = -3 * x1_grid - 2 * x2_grid
-        delta_DJEMBE = -1 * x1_grid
+        delta_DJEMBES = -1 * x1_grid
         delta_BASKET1 = x1_grid
         delta_BASKET2 = x2_grid
 
@@ -825,10 +853,16 @@ class BasketStrategy(Strategy):
         mask = (
             is_valid(delta_CROISSANTS, get_pos("CROISSANTS"), limit["CROISSANTS"]) &
             is_valid(delta_JAMS, get_pos("JAMS"), limit["JAMS"]) &
-            is_valid(delta_DJEMBE, get_pos("DJEMBE"), limit["DJEMBE"]) &
+            is_valid(delta_DJEMBES, get_pos("DJEMBES"), limit["DJEMBES"]) &
             is_valid(delta_BASKET1, get_pos("PICNIC_BASKET1"), limit["PICNIC_BASKET1"]) &
             is_valid(delta_BASKET2, get_pos("PICNIC_BASKET2"), limit["PICNIC_BASKET2"])
         )
+
+        mask &= self.get_market_liquidity_limit("CROISSANTS", delta_CROISSANTS, state)
+        mask &= self.get_market_liquidity_limit("JAMS", delta_JAMS, state)
+        mask &= self.get_market_liquidity_limit("DJEMBES", delta_DJEMBES, state)
+        mask &= self.get_market_liquidity_limit("PICNIC_BASKET1", delta_BASKET1, state)
+        mask &= self.get_market_liquidity_limit("PICNIC_BASKET2", delta_BASKET2, state)
 
         # 计算 score
         score = -spread1 * x1_grid - spread2 * x2_grid
@@ -840,7 +874,6 @@ class BasketStrategy(Strategy):
         best_x2 = x2_grid[idx]
 
         return int(best_x1), int(best_x2)
-
 
 
     #———————下单模块——————
@@ -913,12 +946,13 @@ class BasketStrategy(Strategy):
         delta2 = self.get_price_delta_basket2(state)
         
 
-        #—————————————————————待添加价差过滤条件—————————————————————————#
-        if abs(delta1) < self.delta1_threshold:
+        #价差过滤条件
+        if self.delta1_threshold_negative < delta1 < self.delta1_threshold_positive:
             delta1 = 0
         
-        if abs(delta2) < self.delta2_threshold:
+        if self.delta2_threshold_negative < delta2 < self.delta2_threshold_positive:
             delta2 = 0
+        
             
         # 计算仓位分配比例
         
@@ -1002,16 +1036,18 @@ class Config:
         },
         "PICNIC_BASKET_GROUP": {
             "strategy_cls": BasketStrategy,
-            "symbols": ["PICNIC_BASKET1", "PICNIC_BASKET2", "CROISSANTS", "JAMS", "DJEMBE"],
+            "symbols": ["PICNIC_BASKET1", "PICNIC_BASKET2", "CROISSANTS", "JAMS", "DJEMBES"],
             "position_limits": {
                 "PICNIC_BASKET1": 60,
                 "PICNIC_BASKET2": 100,
                 "CROISSANTS": 250,
                 "JAMS": 350,
-                "DJEMBE": 60
+                "DJEMBES": 60
             },
-            "delta1_threshold": 10,
-            "delta2_threshold": 10,
+            "delta1_threshold_positive": 10,
+            "delta1_threshold_negative": -10,
+            "delta2_threshold_positive": 10,
+            "delta2_threshold_negative": -10,
             "time_window": 100
         }
     }
