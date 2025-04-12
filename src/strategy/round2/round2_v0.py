@@ -7,9 +7,6 @@ import jsonpickle
 import math
 from collections import deque
 
-
-
-
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
@@ -294,50 +291,23 @@ class KelpStrategy(Strategy):
     def load_state(self, state):
         return self.position_history
 
-
-
 class RainforestResinStrategy(Strategy):
     """树脂动态做市策略"""
 
-    def __init__(self, symbol: str, position_limit: int, base_offset: int, level2spread: int):
+    def __init__(self, symbol: str, position_limit: int):
         super().__init__(symbol, position_limit)
         # 策略参数
-        self.base_offset = base_offset
-        self.level2spread = level2spread
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """基于订单簿前三档的加权中间价计算"""
 
-        def weighted_avg(prices_vols, n=3):
-            total_volume = 0
-            price_sum = 0
-            # 按价格排序（买单调降序，卖单调升序）
-            sorted_orders = sorted(prices_vols.items(),
-                                   key=lambda x: x[0],
-                                   reverse=isinstance(prices_vols, dict))
-
-            # 取前n档或全部可用档位
-            for price, vol in sorted_orders[:n]:
-                abs_vol = abs(vol)
-                price_sum += price * abs_vol
-                total_volume += abs_vol
-            return price_sum / total_volume if total_volume > 0 else 0
-
-        # 计算买卖方加权均价
-        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
-        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
-
-        # 返回中间价
-        return (buy_avg + sell_avg) / 2
+        return 0
 
     def generate_orders(self, state: TradingState) -> List[Order]:
         order_depth = state.order_depths[self.symbol]
         position = state.position.get(self.symbol, 0)
         orders = []
-        offset = self.base_offset
         take_position1 = 0
         take_position2 = 0
-        level2spread = self.level2spread
         FIXED_MID = 10000  # 固定中间价
         available_buy = max(0, self.position_limit - position)
         available_sell = max(0, self.position_limit + position)
@@ -381,13 +351,10 @@ class RainforestResinStrategy(Strategy):
             else:
                 break  # 后续价格更低，不再处理
 
-
         # 挂单逻辑 ================================================
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        spread = best_ask - best_bid
-        if spread > level2spread:
-            offset = 4
+
         desired_bid = best_bid + 1
         if desired_bid>10000:
             desired_bid = second_bid +1
@@ -410,13 +377,11 @@ class RainforestResinStrategy(Strategy):
 
         return orders
 
-
     def save_state(self, state) -> dict:
         return {}
 
     def load_state(self, state):
         pass
-
 
 class SquidInkStrategy(Strategy):
     def __init__(self, symbol: str, position_limit: int, ma_window: int = 200,
@@ -669,9 +634,6 @@ class SquidInkStrategy(Strategy):
         
         pass
 
-
-
-
 # PICNIC_BASKET组合策略
 class BasketStrategy(Strategy):
     def __init__(self, symbols: List[str], position_limits: dict,  # 移除了main_symbol参数
@@ -875,10 +837,7 @@ class BasketStrategy(Strategy):
 
         return int(best_x1), int(best_x2)
 
-
     #———————下单模块——————
-
-
 
     def generate_orders_basket1(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int) -> List[Order]:
         orders = []
@@ -1002,8 +961,6 @@ class BasketStrategy(Strategy):
         
     def load_state(self, state):
         return super().load_state(state)
-        
-
 
 class Config:
     def __init__(self):
@@ -1019,8 +976,6 @@ class Config:
             "strategy_cls": RainforestResinStrategy,
             "symbol": "RAINFOREST_RESIN",
             "position_limit": 50,  # 最大持仓
-            "base_offset": 3,  # 基础报价偏移
-            "level2spread": 8,  # spread超过这个值就用另一个offset
         },
         "SQUID_INK": {
             "strategy_cls": SquidInkStrategy,
