@@ -718,7 +718,7 @@ class BasketStrategy(Strategy):
         orders = []
         order_depth = state.order_depths[symbol]
         position = state.position.get(symbol, 0)
-        
+
         if amount > 0:
             for price, sell_amount in sorted(order_depth.sell_orders.items()):
                 max_amount = min(-sell_amount, self.position_limits[symbol] - position, amount)
@@ -731,12 +731,13 @@ class BasketStrategy(Strategy):
 
         elif amount < 0 :
             for price, buy_amount in sorted(order_depth.buy_orders.items()):
-                max_amount = min(buy_amount, position - self.position_limits[symbol], -amount)
+                max_amount = min(buy_amount, position + self.position_limits[symbol], -amount) #amount已经是负数，卖出
                 if max_amount > 0:
                     #卖出
                     orders.append(Order(symbol, price, -max_amount))
                     position -= max_amount
                     amount += max_amount
+
                 if amount == 0:
                     break
         
@@ -747,7 +748,6 @@ class BasketStrategy(Strategy):
         返回PICNIC_BASKET1和其组分的价差：
         delta = basket1 - composition
         """
-        logger.print(state.order_depths)
         basket1_order_depths = state.order_depths['PICNIC_BASKET1']
         croissants_order_depths = state.order_depths['CROISSANTS']
         jams_order_depths = state.order_depths['JAMS']
@@ -787,6 +787,7 @@ class BasketStrategy(Strategy):
         """
         输入state, 价差spread1, 价差spread2。定义为price_basket - price_set
         返回最佳basket1, basket2下单数
+        正数表示买入，负数表示卖出
         """
         search_range1 = self.position_limits['PICNIC_BASKET1']
         search_range2 = self.position_limits['PICNIC_BASKET2']
@@ -826,7 +827,14 @@ class BasketStrategy(Strategy):
         mask &= self.get_market_liquidity_limit("PICNIC_BASKET1", delta_BASKET1, state)
         mask &= self.get_market_liquidity_limit("PICNIC_BASKET2", delta_BASKET2, state)
 
+        # 排除价差过小的情况
+
+        if spread1 == 0:
+            mask &= (x1_grid == 0)
+        if spread2 == 0:
+            mask &= (x2_grid == 0)
         # 计算 score
+
         score = -spread1 * x1_grid - spread2 * x2_grid
         score_masked = np.where(mask, score, -np.inf)
 
@@ -903,7 +911,7 @@ class BasketStrategy(Strategy):
         #获取两个品种的价差，计算仓位分配比例
         delta1 = self.get_price_delta_basket1(state)
         delta2 = self.get_price_delta_basket2(state)
-        
+        logger.print(f"Current delta, delta1: {delta1}, delta2: {delta2}")
 
         #价差过滤条件
         if self.delta1_threshold_negative < delta1 < self.delta1_threshold_positive:
@@ -911,11 +919,12 @@ class BasketStrategy(Strategy):
         
         if self.delta2_threshold_negative < delta2 < self.delta2_threshold_positive:
             delta2 = 0
-        
             
         # 计算仓位分配比例
-        
+        logger.print(f"Filtered delta, delta1: {delta1}, delta2: {delta2}")
         pairing_amount1, pairing_amount2 = self.compute_feasible_arbitrage(state, delta1, delta2)
+        logger.print(f"Pairing amount1: {pairing_amount1}, 2: {pairing_amount2}")
+
 
 
         # 遍历处理所有相关产品
@@ -999,10 +1008,10 @@ class Config:
                 "JAMS": 350,
                 "DJEMBES": 60
             },
-            "delta1_threshold_positive": 10,
-            "delta1_threshold_negative": -10,
-            "delta2_threshold_positive": 10,
-            "delta2_threshold_negative": -10,
+            "delta1_threshold_positive": 100,
+            "delta1_threshold_negative": -100,
+            "delta2_threshold_positive": 100,
+            "delta2_threshold_negative": -100,
             "time_window": 100
         }
     }
@@ -1040,20 +1049,14 @@ class Trader:
             if product in trader_data or product == "PICNIC_BASKET_GROUP":
                 strategy.load_state(state)
             if product in state.order_depths or product == "PICNIC_BASKET_GROUP":
-                logger.print(f"Running strategy for {product}...")
                 product_orders, strategy_state = strategy.run(state)
                 #处理basket订单（包括basket1, basket2, croissants, jams, djembes）
                 if isinstance(product_orders, dict):
-                    logger.print("Processing basket orders...")
                     for symbol, symbol_orders in product_orders.items():
-                        logger.print(f"Processing orders for {symbol}...")
                         if symbol not in orders:
-                            logger.print(f"Creating new order list for {symbol}...")
                             orders[symbol] = []
                         orders[symbol].extend(symbol_orders)
-                        logger.print(f"Added {len(symbol_orders)} orders for {symbol}.")
                 else:
-                    logger.print(f"Processing {product} orders...")
                     orders[product] = product_orders
                 
                 new_trader_data[product] = strategy_state
