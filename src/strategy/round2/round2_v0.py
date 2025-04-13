@@ -637,8 +637,7 @@ class SquidInkStrategy(Strategy):
 # PICNIC_BASKET组合策略
 class BasketStrategy(Strategy):
     def __init__(self, symbols: List[str], position_limits: dict,  # 移除了main_symbol参数
-                delta1_threshold_positive: float, delta2_threshold_positive: float,
-                delta1_threshold_negative: float, delta2_threshold_negative: float, 
+                delta1_threshold: float, delta2_threshold: float, max_delta1_range: float, max_delta2_range: float,
                 time_window: int = 100):
         # 使用第一个symbol作为虚拟主产品
         super().__init__(symbols[0], position_limits[symbols[0]])
@@ -646,10 +645,12 @@ class BasketStrategy(Strategy):
         self.symbols = symbols
         self.position_limits = position_limits
 
-        self.delta1_threshold_positive = delta1_threshold_positive
-        self.delta1_threshold_negative = delta1_threshold_negative
-        self.delta2_threshold_positive = delta2_threshold_positive
-        self.delta2_threshold_negative = delta2_threshold_negative
+        self.delta1_threshold = delta1_threshold
+        self.delta2_threshold = delta2_threshold
+
+        self.max_delta1_range = max_delta1_range
+        self.max_delta2_range = max_delta2_range
+
         self.time_window = time_window
         
         #记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
@@ -876,6 +877,21 @@ class BasketStrategy(Strategy):
             unhedged["DJEMBE"] = expected_d - d
 
         return unhedged
+    
+
+    def scale_pairing_amount(self, pairing_amt: int, delta: float, threshold: float, max_range: float) -> int:
+        if delta == 0:
+            return 0
+
+        # 超出 threshold 的距离
+        distance = abs(delta) - abs(threshold)
+        if distance <= 0:
+            return 0
+
+        # scale 随 delta 增大而指数上升（相对激进）
+        scale = min((distance / (max_range - threshold))**1.5, 1.0)
+        scaled_amt = int(round(pairing_amt * scale))
+        return scaled_amt
     #———————下单模块——————
 
     def generate_orders_basket1(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int, unhedged: dict) -> List[Order]:
@@ -970,16 +986,19 @@ class BasketStrategy(Strategy):
         logger.print(f"Current delta, delta1: {delta1}, delta2: {delta2}")
 
         #价差过滤条件
-        if self.delta1_threshold_negative < delta1 < self.delta1_threshold_positive:
+        if abs(delta1) < self.delta1_threshold:
             delta1 = 0
         
-        if self.delta2_threshold_negative < delta2 < self.delta2_threshold_positive:
+        if abs(delta2) < self.delta2_threshold:
             delta2 = 0
-            
+
+        
         # 计算仓位分配比例
         logger.print(f"Filtered delta, delta1: {delta1}, delta2: {delta2}")
         pairing_amount1, pairing_amount2 = self.compute_feasible_arbitrage(state, delta1, delta2, unhedged)
         logger.print(f"Pairing amount1: {pairing_amount1}, 2: {pairing_amount2}")
+        pairing_amount1 = self.scale_pairing_amount(pairing_amount1, delta1, self.delta1_threshold, self.max_delta1_range)
+        pairing_amount2 = self.scale_pairing_amount(pairing_amount2, delta2, self.delta2_threshold, self.max_delta2_range)
 
 
 
@@ -1064,10 +1083,10 @@ class Config:
                 "JAMS": 350,
                 "DJEMBES": 60
             },
-            "delta1_threshold_positive": 110,
-            "delta1_threshold_negative": -110,
-            "delta2_threshold_positive": 110,
-            "delta2_threshold_negative": -110,
+            "delta1_threshold": 110,
+            "delta2_threshold": 50,
+            "max_delta1_range": 200,
+            "max_delta2_range": 150,
             "time_window": 100
         }
     }

@@ -637,7 +637,10 @@ class SquidInkStrategy(Strategy):
 # PICNIC_BASKET组合策略
 class BasketStrategy(Strategy):
     def __init__(self, symbols: List[str], position_limits: dict,  # 移除了main_symbol参数
-                delta1_threshold: float, delta2_threshold: float, max_delta1_range: float, max_delta2_range: float,
+                delta1_threshold_positive: float, delta2_threshold_positive: float, 
+                delta1_threshold_negative: float, delta2_threshold_negative: float, 
+                max_delta1_positive: float, max_delta2_positive: float,
+                max_delta1_negative: float, max_delta2_negative: float, 
                 time_window: int = 100):
         # 使用第一个symbol作为虚拟主产品
         super().__init__(symbols[0], position_limits[symbols[0]])
@@ -645,11 +648,17 @@ class BasketStrategy(Strategy):
         self.symbols = symbols
         self.position_limits = position_limits
 
-        self.delta1_threshold = delta1_threshold
-        self.delta2_threshold = delta2_threshold
+        self.delta1_threshold_positive = delta1_threshold_positive
+        self.delta1_threshold_negative = delta1_threshold_negative
+        
+        self.delta2_threshold_positive = delta2_threshold_positive
+        self.delta2_threshold_negative = delta2_threshold_negative
+        
+        self.max_delta1_positive = max_delta1_positive
+        self.max_delta1_negative = max_delta1_negative
 
-        self.max_delta1_range = max_delta1_range
-        self.max_delta2_range = max_delta2_range
+        self.max_delta2_positive = max_delta2_positive
+        self.max_delta2_negative = max_delta2_negative
 
         self.time_window = time_window
         
@@ -781,7 +790,6 @@ class BasketStrategy(Strategy):
         
 
     #线性规划得出最佳basket1, basket2下单数
-    #线性规划得出最佳basket1, basket2下单数
     def compute_feasible_arbitrage(
         self, state,
         spread1: float,
@@ -812,24 +820,17 @@ class BasketStrategy(Strategy):
         limit = self.position_limits
 
         # 检查合法性，返回布尔矩阵
-        # 考虑 unhedged 仓位的影响
-        def is_valid(delta, pos, lim, symbol):
-            unhedged_amt = 0
-            if unhedged and symbol in unhedged:
-                unhedged_amt = abs(unhedged[symbol])  # 需要额外预留头寸
-
-            max_buy = lim - pos - unhedged_amt
-            max_sell = pos + lim - unhedged_amt
-
+        def is_valid(delta, pos, lim):
+            max_buy = lim - pos
+            max_sell = pos + lim
             return (delta <= max_buy) & (delta >= -max_sell)
 
-
         mask = (
-            is_valid(delta_CROISSANTS, get_pos("CROISSANTS"), limit["CROISSANTS"], "CROISSANTS") &
-            is_valid(delta_JAMS, get_pos("JAMS"), limit["JAMS"], "JAMS") &
-            is_valid(delta_DJEMBES, get_pos("DJEMBES"), limit["DJEMBES"], "DJEMBES") &
-            is_valid(delta_BASKET1, get_pos("PICNIC_BASKET1"), limit["PICNIC_BASKET1"], "PICNIC_BASKET1") &
-            is_valid(delta_BASKET2, get_pos("PICNIC_BASKET2"), limit["PICNIC_BASKET2"], "PICNIC_BASKET2")
+            is_valid(delta_CROISSANTS, get_pos("CROISSANTS"), limit["CROISSANTS"]) &
+            is_valid(delta_JAMS, get_pos("JAMS"), limit["JAMS"]) &
+            is_valid(delta_DJEMBES, get_pos("DJEMBES"), limit["DJEMBES"]) &
+            is_valid(delta_BASKET1, get_pos("PICNIC_BASKET1"), limit["PICNIC_BASKET1"]) &
+            is_valid(delta_BASKET2, get_pos("PICNIC_BASKET2"), limit["PICNIC_BASKET2"])
         )
 
         mask &= self.get_market_liquidity_limit("CROISSANTS", delta_CROISSANTS, state)
@@ -855,6 +856,7 @@ class BasketStrategy(Strategy):
         best_x2 = x2_grid[idx]
 
         return int(best_x1), int(best_x2)
+
 
     def check_current_position_hedged(self, state) -> dict[str, int]:
         """
@@ -886,19 +888,36 @@ class BasketStrategy(Strategy):
         return unhedged
     
 
-    def scale_pairing_amount(self, pairing_amt: int, delta: float, threshold: float, max_range: float) -> int:
+    def scale_pairing_amount(
+        self,
+        pairing_amt: int,
+        delta: float,
+        threshold_pos: float,
+        threshold_neg: float,
+        max_range_pos: float,
+        max_range_neg: float,
+        weight_pos: float = 1.0,
+        weight_neg: float = 1.0,
+    ) -> int:
         if delta == 0:
             return 0
 
-        # 超出 threshold 的距离
-        distance = abs(delta) - abs(threshold)
-        if distance <= 0:
-            return 0
+        if delta > 0:
+            if delta < threshold_pos:
+                return 0
+            distance = delta - threshold_pos
+            scale = min((distance / (max_range_pos - threshold_pos))**1.5, 1.0)
+            scaled_amt = int(round(pairing_amt * scale * weight_pos))
+        else:
+            if delta > threshold_neg:
+                return 0
+            distance = abs(delta - threshold_neg)
+            scale = min((distance / (abs(max_range_neg - threshold_neg)))**1.5, 1.0)
+            scaled_amt = int(round(pairing_amt * scale * weight_neg))
 
-        # scale 随 delta 增大而指数上升（相对激进）
-        scale = min((distance / (max_range - threshold))**1.5, 1.0)
-        scaled_amt = int(round(pairing_amt * scale))
         return scaled_amt
+    
+
     #———————下单模块——————
 
     def generate_orders_basket1(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int, unhedged: dict) -> List[Order]:
@@ -993,10 +1012,10 @@ class BasketStrategy(Strategy):
         logger.print(f"Current delta, delta1: {delta1}, delta2: {delta2}")
 
         #价差过滤条件
-        if abs(delta1) < self.delta1_threshold:
+        if self.delta1_threshold_negative < delta1 < self.delta1_threshold_positive:
             delta1 = 0
         
-        if abs(delta2) < self.delta2_threshold:
+        if self.delta2_threshold_negative < delta2 < self.delta2_threshold_positive:
             delta2 = 0
 
         
@@ -1004,8 +1023,8 @@ class BasketStrategy(Strategy):
         logger.print(f"Filtered delta, delta1: {delta1}, delta2: {delta2}")
         pairing_amount1, pairing_amount2 = self.compute_feasible_arbitrage(state, delta1, delta2, unhedged)
         logger.print(f"Pairing amount1: {pairing_amount1}, 2: {pairing_amount2}")
-        pairing_amount1 = self.scale_pairing_amount(pairing_amount1, delta1, self.delta1_threshold, self.max_delta1_range)
-        pairing_amount2 = self.scale_pairing_amount(pairing_amount2, delta2, self.delta2_threshold, self.max_delta2_range)
+        pairing_amount1 = self.scale_pairing_amount(pairing_amount1, delta1, self.delta1_threshold_positive, self.delta1_threshold_negative, self.max_delta1_positive, self.max_delta1_negative)
+        pairing_amount2 = self.scale_pairing_amount(pairing_amount2, delta2, self.delta2_threshold_positive, self.delta2_threshold_negative, self.max_delta2_positive, self.max_delta2_negative)
 
 
 
@@ -1090,10 +1109,14 @@ class Config:
                 "JAMS": 350,
                 "DJEMBES": 60
             },
-            "delta1_threshold": 110,
-            "delta2_threshold": 110,
-            "max_delta1_range": 200,
-            "max_delta2_range": 200,
+            "delta1_threshold_positive": 110,
+            "delta1_threshold_negative": -110,
+            "delta2_threshold_positive": 100,
+            "delta2_threshold_negative": -80,
+            "max_delta1_positive": 200,
+            "max_delta1_negative": -200,
+            "max_delta2_positive": 150,
+            "max_delta2_negative": -120,
             "time_window": 100
         }
     }
