@@ -544,12 +544,11 @@ class SquidInkStrategy(Strategy):
                 order_depth = state.order_depths[self.symbol]
                 current_position = state.position.get(self.symbol, 0)
                 max_position = self.position_limit
-                logger.print(
-                    f"fair_value: {fair_value}, current_position: {current_position}, max_position: {max_position}")
+                #logger.print(f"fair_value: {fair_value}, current_position: {current_position}, max_position: {max_position}")
 
                 available_buy = max(0, max_position - current_position)
                 available_sell = max(0, max_position + current_position)
-                logger.print(f"available_buy: {available_buy}, available_sell: {available_sell}")
+                #logger.print(f"available_buy: {available_buy}, available_sell: {available_sell}")
 
                 # 处理卖单（asks）的限价单
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
@@ -559,7 +558,7 @@ class SquidInkStrategy(Strategy):
                             orders.append(Order(self.symbol, ask_price, quantity))
                             available_buy -= quantity
                             eat_pos1 += quantity
-                            logger.print(f"buy {quantity} at {ask_price}")
+                            #logger.print(f"buy {quantity} at {ask_price}")
 
                 # 处理买单（bids）的限价单
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
@@ -569,7 +568,7 @@ class SquidInkStrategy(Strategy):
                             orders.append(Order(self.symbol, bid_price, -quantity))
                             available_sell -= quantity
                             eat_pos2 += quantity
-                            logger.print(f"sell {quantity} at {bid_price}")
+                            #logger.print(f"sell {quantity} at {bid_price}")
 
                 # 计算挂单价格
                 buy_price = math.floor(ma_100 - self.take_spread)
@@ -609,7 +608,7 @@ class SquidInkStrategy(Strategy):
                         max_amount = min(-amount, self.position_limit - current_position)
                         if max_amount > 0:
                             orders.append(Order(self.symbol, price, max_amount))
-                            logger.print(f"Up break, buy {max_amount} at {price}")
+                            #logger.print(f"Up break, buy {max_amount} at {price}")
 
                 if self.direction == -1:
                     # 突破是向下的，先做空
@@ -617,7 +616,7 @@ class SquidInkStrategy(Strategy):
                         max_amount = min(amount, self.position_limit + current_position)
                         if max_amount > 0:
                             orders.append(Order(self.symbol, price, -max_amount))
-                            logger.print(f"Down break, sell {max_amount} at {price}")
+                            #logger.print(f"Down break, sell {max_amount} at {price}")
 
                 self.current_mode = "trend_following"
 
@@ -631,13 +630,12 @@ class SquidInkStrategy(Strategy):
             position = state.position.get(self.symbol, 0)
 
             # 判断价格是否回归
-            logger.print(
-                f"Current distance: {(fair_value - self.breakout_price) * self.direction}")
+            ##logger.print(f"Current distance: {(fair_value - self.breakout_price) * self.direction}")
             # 回归就清仓
             if (fair_value - self.breakout_price) * self.direction < 0:
-                logger.print(f"Fall back! {fair_value}")
+                #logger.print(f"Fall back! {fair_value}")
                 if position != 0:
-                    logger.print(f"Close position {position}")
+                    #logger.print(f"Close position {position}")
                     if self.direction == 1:
                         # 突破是向上的，平空
                         max_amount = min(best_bid_amount, -position)
@@ -662,7 +660,7 @@ class SquidInkStrategy(Strategy):
                 # 先检查仓位有没有反向吃满，如果没有则先吃满。注意只能做一次，不然会反复反向吃满
                 if position * self.direction < self.position_limit and not self.prepared_reverse:
                     logger.print(f"Preparing reverse, current position {position}, direction {self.direction}")
-                    logger.print(f"{self.position_limit - position} to fill")
+                    #logger.print(f"{self.position_limit - position} to fill")
                     if self.direction == 1:
                         # 突破是向上的，先做多
                         for price, amount in sorted(order_depth.sell_orders.items()):
@@ -853,12 +851,12 @@ class BasketStrategy(Strategy):
     def calculate_basket_value(self, basket: str) -> float:
         """计算篮子理论价值 - 组件价格总和"""
         if not self.component_prices:
-            logger.print(f"No component prices available for {basket}")
+            #logger.print(f"No component prices available for {basket}")
             return 0
             
         components = self.basket_composition[basket]
         basket_value = sum(qty * self.component_prices.get(product, 0) for product, qty in components.items())
-        logger.print(f"Calculated {basket} theoretical value: {basket_value}")
+        #logger.print(f"Calculated {basket} theoretical value: {basket_value}")
         return basket_value
     
     def calculate_std_dev(self, basket: str) -> float:
@@ -870,119 +868,122 @@ class BasketStrategy(Strategy):
 
     #basket统一订单生成函数
     def generate_basket_orders(self, state: TradingState) -> List[Order]:
-        """生成订单逻辑 - 实现基础篮子套利策略"""
-        orders = []
-        logger.print(f"BasketStrategy.generate_orders - Starting for {self.symbol}")
-        
-        # 1. 更新组件价格
-        for component in ['CROISSANTS', 'JAMS', 'DJEMBES']:
-            if component in state.order_depths:
-                logger.print(f"Processing component {component}")
-                component_price = self.calculate_fair_value(state.order_depths[component])
-                if component_price > 0:
-                    self.component_prices[component] = component_price
-                    logger.print(f"Updated {component} price: {component_price}")
-                else:
-                    logger.print(f"Failed to get valid price for {component}")
-        
-        logger.print(f"Component prices: {self.component_prices}")
-        
-        # 2. 获取篮子价格和计算理论价值
-        basket_prices = {}
-        basket_values = {}
-        price_diffs = {}
-        
-        for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
-            # 跳过非当前篮子（确保完全分离交易）
-            if basket != self.symbol and self.symbol.startswith('PICNIC_BASKET'):
-                logger.print(f"Skipping {basket} as we're only trading {self.symbol}")
-                continue
-                
-            # 计算篮子理论价值
-            basket_value = self.calculate_basket_value(basket)
-            if basket_value > 0:
-                basket_values[basket] = basket_value
-                logger.print(f"{basket} theoretical value: {basket_value}")
-                
-                # 获取篮子市场价格
-                if basket in state.order_depths:
-                    logger.print(f"Processing basket {basket}")
-                    basket_price = self.calculate_fair_value(state.order_depths[basket])
-                    if basket_price > 0:
-                        basket_prices[basket] = basket_price
-                        logger.print(f"{basket} market price: {basket_price}")
-                        
-                        # 计算价差并记录
-                        price_diff = basket_price - basket_value
-                        price_diffs[basket] = price_diff
-                        logger.print(f"{basket} price diff: {price_diff}")
-                        
-                        # 更新价差历史
-                        self.price_diff_history[basket].append(price_diff)
-                        
-                        # 更新标准差 (现在是价差的标准差)
-                        self.std_devs[basket] = max(self.calculate_std_dev(basket), self.min_std_threshold)
-                        logger.print(f"{basket} price diff std dev: {self.std_devs[basket]}, history size: {len(self.price_diff_history[basket])}")
+            """生成订单逻辑 - 实现基础篮子套利策略"""
+            orders = []
+            #logger.print(f"BasketStrategy.generate_orders - Starting for {self.symbol}")
+            
+            # 1. 更新组件价格
+            for component in ['CROISSANTS', 'JAMS', 'DJEMBES']:
+                if component in state.order_depths:
+                    #logger.print(f"Processing component {component}")
+                    component_price = self.calculate_fair_value(state.order_depths[component])
+                    if component_price > 0:
+                        self.component_prices[component] = component_price
+                        #logger.print(f"Updated {component} price: {component_price}")
                     else:
-                        logger.print(f"Failed to get valid price for {basket}")
+                        logger.print(f"Failed to get valid price for {component}")
+            
+            #logger.print(f"Component prices: {self.component_prices}")
+            
+            # 2. 获取篮子价格和计算理论价值
+            basket_prices = {}
+            basket_values = {}
+            price_diffs = {}
+            
+            for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
+                logger.print(f"2. Dealing basket {basket}")
+                '''
+                # 跳过非当前篮子（确保完全分离交易）
+                if basket != self.symbol and self.symbol.startswith('PICNIC_BASKET'):
+                    logger.print(f"Skipping {basket} as we're only trading {self.symbol}")
+                    continue
+                '''
+                    
+                # 计算篮子理论价值
+                basket_value = self.calculate_basket_value(basket)
+                if basket_value > 0:
+                    basket_values[basket] = basket_value
+                    #logger.print(f"{basket} theoretical value: {basket_value}")
+                    
+                    # 获取篮子市场价格
+                    if basket in state.order_depths:
+                        #logger.print(f"Processing basket {basket}")
+                        basket_price = self.calculate_fair_value(state.order_depths[basket])
+                        if basket_price > 0:
+                            basket_prices[basket] = basket_price
+                            #logger.print(f"{basket} market price: {basket_price}")
+                            
+                            # 计算价差并记录
+                            price_diff = basket_price - basket_value
+                            price_diffs[basket] = price_diff
+                            #logger.print(f"{basket} price diff: {price_diff}")
+                            
+                            # 更新价差历史
+                            self.price_diff_history[basket].append(price_diff)
+                            
+                            # 更新标准差 (现在是价差的标准差)
+                            self.std_devs[basket] = max(self.calculate_std_dev(basket), self.min_std_threshold)
+                            #logger.print(f"{basket} price diff std dev: {self.std_devs[basket]}, history size: {len(self.price_diff_history[basket])}")
+                        else:
+                            logger.print(f"Failed to get valid price for {basket}")
 
-        
-        # 3. 确定交易方向和数量
-        for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
-            if basket in price_diffs and self.std_devs[basket] > 0:
-                current_position = state.position.get(basket, 0)
-                position_limit = self.position_limits[basket]
-                std_threshold = self.std_thresholds[basket]
-                
-                # 计算可用交易额度
-                available_buy = max(0, position_limit - current_position)
-                available_sell = max(0, position_limit + current_position)
-                
-                # 计算交易信号 - 使用篮子特定的标准差阈值
-                buy_signal = price_diffs[basket] < -std_threshold * self.std_devs[basket]  # 篮子低估，买入信号
-                sell_signal = price_diffs[basket] > std_threshold * self.std_devs[basket]  # 篮子高估，卖出信号
-                # 执行买入
-                if buy_signal and available_buy > 0 and basket in state.order_depths:
-                    # 找出最佳卖价
-                    sell_orders = sorted(state.order_depths[basket].sell_orders.items())
-                    basket_orders = []
+            
+            # 3. 确定交易方向和数量
+            for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
+                logger.print(f"3. Dealing with {basket}")
+                if basket in price_diffs and self.std_devs[basket] > 0:
+                    current_position = state.position.get(basket, 0)
+                    position_limit = self.position_limits[basket]
+                    std_threshold = self.std_thresholds[basket]
                     
-                    # 遍历所有卖单，从最低价开始吃单
-                    remaining_buy = available_buy
-                    for price, volume in sell_orders:
-                        # 卖单的volume是负数
-                        buyable = min(remaining_buy, -volume)
-                        if buyable > 0:
-                            basket_orders.append(Order(basket, price, buyable))
-                            logger.print(f"BUY {basket}: {buyable} @ {price}")
-                            remaining_buy -= buyable
-                            if remaining_buy <= 0:
-                                break
+                    # 计算可用交易额度
+                    available_buy = max(0, position_limit - current_position)
+                    available_sell = max(0, position_limit + current_position)
                     
-                    orders.extend(basket_orders)
-                
-                # 执行卖出
-                elif sell_signal and available_sell > 0 and basket in state.order_depths:
-                    # 找出最佳买价
-                    buy_orders = sorted(state.order_depths[basket].buy_orders.items(), reverse=True)
-                    basket_orders = []
+                    # 计算交易信号 - 使用篮子特定的标准差阈值
+                    buy_signal = price_diffs[basket] < -std_threshold * self.std_devs[basket]  # 篮子低估，买入信号
+                    sell_signal = price_diffs[basket] > std_threshold * self.std_devs[basket]  # 篮子高估，卖出信号
+                    # 执行买入
+                    if buy_signal and available_buy > 0 and basket in state.order_depths:
+                        # 找出最佳卖价
+                        sell_orders = sorted(state.order_depths[basket].sell_orders.items())
+                        basket_orders = []
+                        
+                        # 遍历所有卖单，从最低价开始吃单
+                        remaining_buy = available_buy
+                        for price, volume in sell_orders:
+                            # 卖单的volume是负数
+                            buyable = min(remaining_buy, -volume)
+                            if buyable > 0:
+                                basket_orders.append(Order(basket, price, buyable))
+                                logger.print(f"BUY {basket}: {buyable} @ {price}")
+                                remaining_buy -= buyable
+                                if remaining_buy <= 0:
+                                    break
+                        
+                        orders.extend(basket_orders)
                     
-                    # 遍历所有买单，从最高价开始吃单
-                    remaining_sell = available_sell
-                    for price, volume in buy_orders:
-                        # 买单的volume是正数
-                        sellable = min(remaining_sell, volume)
-                        if sellable > 0:
-                            basket_orders.append(Order(basket, price, -sellable))
-                            logger.print(f"SELL {basket}: {sellable} @ {price}")
-                            remaining_sell -= sellable
-                            if remaining_sell <= 0:
-                                break
-                    
-                    orders.extend(basket_orders)
-        
-        return orders
-
+                    # 执行卖出
+                    elif sell_signal and available_sell > 0 and basket in state.order_depths:
+                        # 找出最佳买价
+                        buy_orders = sorted(state.order_depths[basket].buy_orders.items(), reverse=True)
+                        basket_orders = []
+                        
+                        # 遍历所有买单，从最高价开始吃单
+                        remaining_sell = available_sell
+                        for price, volume in buy_orders:
+                            # 买单的volume是正数
+                            sellable = min(remaining_sell, volume)
+                            if sellable > 0:
+                                basket_orders.append(Order(basket, price, -sellable))
+                                logger.print(f"SELL {basket}: {sellable} @ {price}")
+                                remaining_sell -= sellable
+                                if remaining_sell <= 0:
+                                    break
+                        
+                        orders.extend(basket_orders)
+            
+            return orders
     def generate_orders_basket1(self, symbol: str, state: TradingState) -> List[Order]:
         orders = []
         basket_orders = self.generate_basket_orders(state)
@@ -992,7 +993,7 @@ class BasketStrategy(Strategy):
     def generate_orders_basket2(self, symbol: str, state: TradingState) -> List[Order]:
         orders = []
         basket_orders = self.generate_basket_orders(state)
-        orders = [basket_order for basket_order in basket_orders if basket_order.symbol == 'PICNIC_BASKET2']    
+        orders = [basket_order for basket_order in basket_orders if basket_order.symbol != 'PICNIC_BASKET1']    
         return orders
 
     def generate_orders_croissant(self, symbol: str, state: TradingState) -> List[Order]:
@@ -1128,10 +1129,6 @@ class BasketStrategy(Strategy):
                 # 加载组件价格
                 if 'component_prices' in basket_data:
                     self.component_prices = basket_data['component_prices']
-                    
-                logger.print(f"Loaded state for {self.symbol}, price diff history lengths: " + 
-                            f"PICNIC_BASKET1={len(self.price_diff_history['PICNIC_BASKET1'])}, " +
-                            f"PICNIC_BASKET2={len(self.price_diff_history['PICNIC_BASKET2'])}")
             except Exception as e:
                 logger.print(f"Error loading state: {str(e)}")
 
