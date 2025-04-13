@@ -171,7 +171,7 @@ class Strategy(ABC):
 class KelpStrategy(Strategy):
     """海带做市策略"""
 
-    def __init__(self, symbol: str, position_limit: int, alpha: float, beta):
+    def __init__(self, symbol: str, position_limit: int, alpha: float, beta: float):
         super().__init__(symbol, position_limit)
         # 添加海带策略特有参数
         self.alpha = alpha  # adjusted fair price清仓系数
@@ -300,29 +300,7 @@ class RainforestResinStrategy(Strategy):
         super().__init__(symbol, position_limit)
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """基于订单簿前三档的加权中间价计算"""
-
-        def weighted_avg(prices_vols, n=3):
-            total_volume = 0
-            price_sum = 0
-            # 按价格排序（买单调降序，卖单调升序）
-            sorted_orders = sorted(prices_vols.items(),
-                                   key=lambda x: x[0],
-                                   reverse=isinstance(prices_vols, dict))
-
-            # 取前n档或全部可用档位
-            for price, vol in sorted_orders[:n]:
-                abs_vol = abs(vol)
-                price_sum += price * abs_vol
-                total_volume += abs_vol
-            return price_sum / total_volume if total_volume > 0 else 0
-
-        # 计算买卖方加权均价
-        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
-        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
-
-        # 返回中间价
-        return (buy_avg + sell_avg) / 2
+        return 0
 
     def generate_orders(self, state: TradingState) -> List[Order]:
         order_depth = state.order_depths[self.symbol]
