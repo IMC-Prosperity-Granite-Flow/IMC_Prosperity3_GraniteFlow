@@ -501,6 +501,7 @@ class SquidInkStrategy(Strategy):
                         # 突破是向下的，先做空
                         for price, amount in sorted(order_depth.buy_orders.items()):
                             max_amount = min(amount, position - self.position_limit)
+                            logger.print(f"amount: { amount }, position {position}, self.position_limit {self.position_limit}, max_amount {max_amount}")
                             if max_amount > 0:
                                 orders.append(Order(self.symbol, price, -max_amount))
 
