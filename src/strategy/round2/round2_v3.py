@@ -704,7 +704,8 @@ class SquidInkStrategy(Strategy):
 
 # PICNIC_BASKET组合策略
 class BasketStrategy(Strategy):
-    def __init__(self, symbols: List[str], position_limits: dict,time_window: int = 20):
+    def __init__(self, symbols: List[str], position_limits: dict,std_window: int = 20,
+        delta1_threshold: float=10, delta2_threshold: float=10, time_window: int = 100):
         # 使用第一个symbol作为虚拟主产品
         super().__init__(symbols[0], position_limits[symbols[0]])
 
@@ -713,13 +714,45 @@ class BasketStrategy(Strategy):
 
         self.delta1_history = deque(maxlen=time_window)
         self.delta2_history = deque(maxlen=time_window)
-        self.std_window = time_window
+        self.std_window = std_window
+        self.delta1_threshold = delta1_threshold
+        self.delta2_threshold = delta2_threshold
+        self.time_window = time_window
         self.std_multiplier = 2
 
         # 记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
         self.position_history = {symbol: [] for symbol in self.symbols}
         # 记录fair_value历史
         self.fair_value_history = {symbol: [] for symbol in self.symbols}
+
+
+        self.basket_composition = {
+            'PICNIC_BASKET1': {'CROISSANTS': 6, 'JAMS': 3, 'DJEMBES': 1},
+            'PICNIC_BASKET2': {'CROISSANTS': 4, 'JAMS': 2}
+        }
+        # 存储价差历史，而不是价格历史
+        self.price_diff_history = {
+            'PICNIC_BASKET1': deque(maxlen=20),
+            'PICNIC_BASKET2': deque(maxlen=20)
+        }
+        
+        # 标准差缓存
+        self.std_devs = {
+            'PICNIC_BASKET1': 0,
+            'PICNIC_BASKET2': 0
+        }
+        
+        # 组件价格缓存
+        self.component_prices = {}
+        
+        # 篮子特定交易参数（标准差倍数）- PB1使用更保守的参数
+        self.std_thresholds = {
+            'PICNIC_BASKET1': 3.5,  # 更保守，防止亏损
+            'PICNIC_BASKET2': 2.0   # 更激进，提高盈利
+        }
+        
+        # 最小标准差阈值，防止初期过度交易
+        self.min_std_threshold = 10.0
 
     # ——————工具函数——————
 
@@ -816,14 +849,150 @@ class BasketStrategy(Strategy):
         delta = basket2_fair_value - 4 * croissants_fair_value - 2 * jams_fair_value
 
         return delta
+    
+    def calculate_basket_value(self, basket: str) -> float:
+        """计算篮子理论价值 - 组件价格总和"""
+        if not self.component_prices:
+            logger.print(f"No component prices available for {basket}")
+            return 0
+            
+        components = self.basket_composition[basket]
+        basket_value = sum(qty * self.component_prices.get(product, 0) for product, qty in components.items())
+        logger.print(f"Calculated {basket} theoretical value: {basket_value}")
+        return basket_value
+    
+    def calculate_std_dev(self, basket: str) -> float:
+        """计算给定篮子价差的标准差"""
+        if len(self.price_diff_history[basket]) < 2:
+            return 0
+        return np.std(list(self.price_diff_history[basket]))
     # ———————下单模块——————
+
+    #basket统一订单生成函数
+    def generate_basket_orders(self, state: TradingState) -> List[Order]:
+        """生成订单逻辑 - 实现基础篮子套利策略"""
+        orders = []
+        logger.print(f"BasketStrategy.generate_orders - Starting for {self.symbol}")
+        
+        # 1. 更新组件价格
+        for component in ['CROISSANTS', 'JAMS', 'DJEMBES']:
+            if component in state.order_depths:
+                logger.print(f"Processing component {component}")
+                component_price = self.calculate_fair_value(state.order_depths[component])
+                if component_price > 0:
+                    self.component_prices[component] = component_price
+                    logger.print(f"Updated {component} price: {component_price}")
+                else:
+                    logger.print(f"Failed to get valid price for {component}")
+        
+        logger.print(f"Component prices: {self.component_prices}")
+        
+        # 2. 获取篮子价格和计算理论价值
+        basket_prices = {}
+        basket_values = {}
+        price_diffs = {}
+        
+        for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
+            # 跳过非当前篮子（确保完全分离交易）
+            if basket != self.symbol and self.symbol.startswith('PICNIC_BASKET'):
+                logger.print(f"Skipping {basket} as we're only trading {self.symbol}")
+                continue
+                
+            # 计算篮子理论价值
+            basket_value = self.calculate_basket_value(basket)
+            if basket_value > 0:
+                basket_values[basket] = basket_value
+                logger.print(f"{basket} theoretical value: {basket_value}")
+                
+                # 获取篮子市场价格
+                if basket in state.order_depths:
+                    logger.print(f"Processing basket {basket}")
+                    basket_price = self.calculate_fair_value(state.order_depths[basket])
+                    if basket_price > 0:
+                        basket_prices[basket] = basket_price
+                        logger.print(f"{basket} market price: {basket_price}")
+                        
+                        # 计算价差并记录
+                        price_diff = basket_price - basket_value
+                        price_diffs[basket] = price_diff
+                        logger.print(f"{basket} price diff: {price_diff}")
+                        
+                        # 更新价差历史
+                        self.price_diff_history[basket].append(price_diff)
+                        
+                        # 更新标准差 (现在是价差的标准差)
+                        self.std_devs[basket] = max(self.calculate_std_dev(basket), self.min_std_threshold)
+                        logger.print(f"{basket} price diff std dev: {self.std_devs[basket]}, history size: {len(self.price_diff_history[basket])}")
+                    else:
+                        logger.print(f"Failed to get valid price for {basket}")
+
+        
+        # 3. 确定交易方向和数量
+        for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
+            if basket in price_diffs and self.std_devs[basket] > 0:
+                current_position = state.position.get(basket, 0)
+                position_limit = self.position_limits[basket]
+                std_threshold = self.std_thresholds[basket]
+                
+                # 计算可用交易额度
+                available_buy = max(0, position_limit - current_position)
+                available_sell = max(0, position_limit + current_position)
+                
+                # 计算交易信号 - 使用篮子特定的标准差阈值
+                buy_signal = price_diffs[basket] < -std_threshold * self.std_devs[basket]  # 篮子低估，买入信号
+                sell_signal = price_diffs[basket] > std_threshold * self.std_devs[basket]  # 篮子高估，卖出信号
+                # 执行买入
+                if buy_signal and available_buy > 0 and basket in state.order_depths:
+                    # 找出最佳卖价
+                    sell_orders = sorted(state.order_depths[basket].sell_orders.items())
+                    basket_orders = []
+                    
+                    # 遍历所有卖单，从最低价开始吃单
+                    remaining_buy = available_buy
+                    for price, volume in sell_orders:
+                        # 卖单的volume是负数
+                        buyable = min(remaining_buy, -volume)
+                        if buyable > 0:
+                            basket_orders.append(Order(basket, price, buyable))
+                            logger.print(f"BUY {basket}: {buyable} @ {price}")
+                            remaining_buy -= buyable
+                            if remaining_buy <= 0:
+                                break
+                    
+                    orders.extend(basket_orders)
+                
+                # 执行卖出
+                elif sell_signal and available_sell > 0 and basket in state.order_depths:
+                    # 找出最佳买价
+                    buy_orders = sorted(state.order_depths[basket].buy_orders.items(), reverse=True)
+                    basket_orders = []
+                    
+                    # 遍历所有买单，从最高价开始吃单
+                    remaining_sell = available_sell
+                    for price, volume in buy_orders:
+                        # 买单的volume是正数
+                        sellable = min(remaining_sell, volume)
+                        if sellable > 0:
+                            basket_orders.append(Order(basket, price, -sellable))
+                            logger.print(f"SELL {basket}: {sellable} @ {price}")
+                            remaining_sell -= sellable
+                            if remaining_sell <= 0:
+                                break
+                    
+                    orders.extend(basket_orders)
+        
+        return orders
 
     def generate_orders_basket1(self, symbol: str, state: TradingState) -> List[Order]:
         orders = []
+        basket_orders = self.generate_basket_orders(state)
+        orders = [basket_order for basket_order in basket_orders if basket_order.symbol == 'PICNIC_BASKET1']
         return orders
 
     def generate_orders_basket2(self, symbol: str, state: TradingState) -> List[Order]:
         orders = []
+        basket_orders = self.generate_basket_orders(state)
+        orders = [basket_order for basket_order in basket_orders if basket_order.symbol == 'PICNIC_BASKET2']    
         return orders
 
     def generate_orders_croissant(self, symbol: str, state: TradingState) -> List[Order]:
@@ -933,10 +1102,38 @@ class BasketStrategy(Strategy):
             if symbol in state.order_depths:
                 self.save_history(symbol, state)
 
-        return super().save_state(state)
+        return {
+            'price_diff_history': {
+                basket: list(history) for basket, history in self.price_diff_history.items()
+            },
+            'std_devs': self.std_devs,
+            'component_prices': self.component_prices
+        }
 
     def load_state(self, state):
-        return super().load_state(state)
+        if hasattr(state, 'traderData') and state.traderData:
+            try:
+                trader_data = json.loads(state.traderData)
+                basket_data = trader_data.get(self.symbol, {})
+                
+                # 加载价差历史
+                if 'price_diff_history' in basket_data:
+                    for basket, history in basket_data['price_diff_history'].items():
+                        self.price_diff_history[basket] = deque(history, maxlen=20)
+                
+                # 加载标准差
+                if 'std_devs' in basket_data:
+                    self.std_devs = basket_data['std_devs']
+                
+                # 加载组件价格
+                if 'component_prices' in basket_data:
+                    self.component_prices = basket_data['component_prices']
+                    
+                logger.print(f"Loaded state for {self.symbol}, price diff history lengths: " + 
+                            f"PICNIC_BASKET1={len(self.price_diff_history['PICNIC_BASKET1'])}, " +
+                            f"PICNIC_BASKET2={len(self.price_diff_history['PICNIC_BASKET2'])}")
+            except Exception as e:
+                logger.print(f"Error loading state: {str(e)}")
 
 class Config:
     def __init__(self):
@@ -973,7 +1170,11 @@ class Config:
                     "JAMS": 350,
                     "DJEMBES": 60
                 },
-                "time_window": 20
+                "std_window": 20,
+                "delta1_threshold": 10,
+                "delta2_threshold": 10,
+                "time_window": 100
+
             }
         }
 
