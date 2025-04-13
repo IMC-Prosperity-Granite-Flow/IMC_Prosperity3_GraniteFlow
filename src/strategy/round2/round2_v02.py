@@ -906,7 +906,7 @@ class BasketStrategy(Strategy):
             if delta < threshold_pos:
                 return 0
             distance = delta - threshold_pos
-            scale = min((distance / (max_range_pos - threshold_pos))**1.5, 1.0)
+            scale = min((distance / (max_range_pos - threshold_pos))**2, 1.0)
             scaled_amt = int(round(pairing_amt * scale * weight_pos))
         else:
             if delta > threshold_neg:
