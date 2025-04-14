@@ -859,9 +859,15 @@ class BasketStrategy(Strategy):
         
         # 添加额外的固定价值
         if basket == 'PICNIC_BASKET1':
+<<<<<<< HEAD
             basket_value += 25
         elif basket == 'PICNIC_BASKET2':
             basket_value += 110
+=======
+            basket_value += 30
+        elif basket == 'PICNIC_BASKET2':
+            basket_value += 103
+>>>>>>> main
             
         #logger.print(f"Calculated {basket} theoretical value: {basket_value}")
         return basket_value
