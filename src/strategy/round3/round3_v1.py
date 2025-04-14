@@ -973,6 +973,283 @@ class BasketStrategy(Strategy):
             except Exception as e:
                 logger.print(f"Error loading state: {str(e)}")
 
+
+class VolcanicRockStrategy(Strategy):
+    def __init__(self, symbols: List[str], position_limits: dict, threshold: float = 10, time_window: int = 100):
+        # 使用第一个symbol作为虚拟主产品
+        super().__init__(symbols[0], position_limits[symbols[0]])
+        self.symbols = symbols
+        self.position_limits = position_limits
+        self.time_window = time_window
+        self.history = {}
+        self.threshold = threshold
+        self.T = 5/365
+
+    #工具函数
+
+    def calculate_mid_price(self, order_depth):
+        """使用买卖加权的price计算mid_price"""
+
+        def weighted_avg(prices_vols, n=3):
+            total_volume = 0
+            price_sum = 0
+            # 按价格排序（买单调降序，卖单调升序）
+            sorted_orders = sorted(prices_vols.items(),
+                                   key=lambda x: x[0],
+                                   reverse=isinstance(prices_vols, dict))
+
+            # 取前n档或全部可用档位
+            for price, vol in sorted_orders[:n]:
+                abs_vol = abs(vol)
+                price_sum += price * abs_vol
+                total_volume += abs_vol
+            return price_sum / total_volume if total_volume > 0 else 0
+
+        # 计算买卖方加权均价
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+
+        mid_price = (buy_avg + sell_avg) / 2
+        # 返回中间价
+        return mid_price
+
+
+    @staticmethod
+    def norm_cdf(x: float) -> float:
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    
+    def bs_call_price(self, S: float, K: float, T: float, r: float, sigma: float) -> float:
+        """Black-Scholes formula for call option price using numpy."""
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        return S * self.norm_cdf(d1) - K * np.exp(-r * T) * self.norm_cdf(d2)
+    
+    def get_implied_volatility(self, price, S, K, T, max_iter=50, tol=1e-4):
+        if T <= 0 or price <= 0 or S <= 0:
+            return 0.2  # fallback
+
+        low, high = 0.01, 2.0  # 波动率搜索范围
+        for _ in range(max_iter):
+            mid = (low + high) / 2
+            val = self.bs_call_price(S, K, T, 0.0, mid)
+            if abs(val - price) < tol:
+                return mid
+            if val > price:
+                high = mid
+            else:
+                low = mid
+        return mid
+    
+    def predict_iv_weighted(self, voucher_prices, underlying_prices, strike, T_list, decay=0.1):
+        n = len(voucher_prices)
+        if n < 5:
+            return 0.2
+
+        iv_list = []
+        weights = []
+
+        for i in range(n):
+            S = underlying_prices[i]
+            T = T_list[i]
+            price = voucher_prices[i]
+
+            if S <= 0 or T <= 0 or price <= 0:
+                continue
+
+            iv = self.get_implied_volatility(price, S, strike, T)
+            weight = math.exp(-decay * (n - 1 - i))
+            iv_list.append(iv * weight)
+            weights.append(weight)
+
+        if len(iv_list) < 5:
+            return 0.2
+
+        return sum(iv_list) / sum(weights)
+
+    def compute_call_delta(self, S, K, T, sigma):
+        if T <= 0 or sigma <= 0:
+            return 1.0 if S > K else 0.0
+        d1 = (math.log(S / K) + 0.5 * sigma ** 2 * T) / (sigma * math.sqrt(T))
+        return self.norm_cdf(d1)
+    
+
+    def calculate_fair_value(self, symbol: str):
+        """利用bs模型定价"""
+        #从symbol中取出strike，例如VOLCANIC_ROCK_VOUCHER_9500取出9500
+        strike = int(symbol.split("_")[-1])
+        data = self.history[symbol]
+        voucher_prices = data["mid_price_history"]
+        underlying_prices = self.history["VOLCANIC_ROCK"]['mid_price_history']
+        T_list = [self.T] * len(voucher_prices)
+        current_T = T_list[-1]
+
+        #拟合隐含波动率
+        iv = self.predict_iv_weighted(voucher_prices, underlying_prices, strike, T_list)
+
+        current_S = self.history["VOLCANIC_ROCK"]['mid_price_history'][-1]
+        #BS 模型定价
+        fair_price = self.bs_call_price(current_S, strike, current_T, r=0.0, sigma=iv)
+
+        return fair_price
+
+    #下单函数
+
+    def calculate_current_portfolio_delta(self, state: TradingState) -> float:
+        total_delta = 0.0
+        S = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK"])
+        if S is None:
+            return 0.0
+
+        for symbol in self.symbols:
+            if "VOUCHER" not in symbol:
+                continue
+
+            position = state.position.get(symbol, 0)
+            if position == 0:
+                continue
+
+            K = int(symbol.split("_")[-1])
+            price = self.calculate_mid_price(state.order_depths[symbol])
+            sigma = self.get_implied_volatility(price, S, K, self.T)
+            if sigma is None:
+                continue
+
+            delta = self.compute_call_delta(S, K, self.T, sigma)
+            total_delta += delta * position
+
+        return total_delta
+    
+    def generate_orders_fair_value_arbitrage(self, state: TradingState) -> Tuple[Dict[str, List[Order]], float]:
+        orders = {}
+        total_delta_exposure = 0.0  # 用局部变量，不要用 self 记录，避免多次调用累加错
+
+        for symbol in self.symbols:
+            if symbol == "VOLCANIC_ROCK":
+                continue  # 跳过标的
+
+            order_depth = state.order_depths[symbol]
+            mid_price = self.calculate_mid_price(order_depth)
+            fair_price = self.calculate_fair_value(symbol)
+            position = state.position.get(symbol, 0)
+            limit = self.position_limits[symbol]
+
+            delta_p = fair_price - mid_price
+            acceptable_threshold = self.threshold
+            orders_for_symbol = []
+
+            # 获取 strike 和基础价格
+            K = int(symbol.split("_")[-1])
+            S = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK"])
+            T = self.T
+            
+            sigma = self.get_implied_volatility(mid_price, S, K ,T)
+            
+
+            # None check
+            if mid_price is None or fair_price is None or S is None or sigma is None:
+                continue
+
+            option_delta = self.compute_call_delta(S, K, T, sigma)
+
+
+            logger.print(f"current symbol {symbol}, mid_price {mid_price}, fair_price {fair_price}")
+            logger.print(f"delta_p {delta_p}, option_delta {option_delta}")
+            if delta_p > self.threshold and position < limit:
+                volume = min(limit - position, 1)
+                buy_price = int(mid_price + 1)
+                orders_for_symbol.append(Order(symbol, buy_price, volume))
+                total_delta_exposure += option_delta * volume
+
+            elif delta_p < -self.threshold and position > -limit:
+                volume = min(position + limit, 1)
+                sell_price = int(mid_price - 1)
+                orders_for_symbol.append(Order(symbol, sell_price, -volume))
+                total_delta_exposure -= option_delta * volume
+
+            if orders_for_symbol:
+                orders[symbol] = orders_for_symbol
+
+        return orders, total_delta_exposure
+    
+    def generate_orders_delta_hedge(self, state: TradingState, total_delta_exposure: float) -> List[Order]:
+        orders = []
+        symbol = "VOLCANIC_ROCK"
+        position = state.position.get(symbol, 0)
+        limit = self.position_limits[symbol]
+
+        mid_price = self.calculate_mid_price(state.order_depths[symbol])
+        if mid_price is None:
+            return []
+
+        target = -int(round(total_delta_exposure))  # delta hedge 理论目标
+        diff = target - position
+
+        if diff > 0:
+            # 需要买入
+            volume = min(diff, limit - position)
+            if volume > 0:
+                orders.append(Order(symbol, int(mid_price - 1), volume))
+        elif diff < 0:
+            # 需要卖出
+            volume = min(-diff, position + limit)
+            if volume > 0:
+                orders.append(Order(symbol, int(mid_price + 1), -volume))
+
+        return orders
+    
+    def generate_orders(self, state: TradingState) -> Dict[str, List[Order]]:
+        orders = {}
+        #先检查当前仓位的hedge情况
+        current_delta = self.calculate_current_portfolio_delta(state)
+
+        arbitrage_orders, total_delta_exposure = self.generate_orders_fair_value_arbitrage(state)
+        hedge_orders = self.generate_orders_delta_hedge(state, total_delta_exposure + current_delta)
+
+        orders.update(arbitrage_orders)
+        if hedge_orders:
+            orders["VOLCANIC_ROCK"] = hedge_orders
+
+        return orders
+    
+
+    def load_state(self, state):
+        
+        #储存每个产品的mid_price
+        rock_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK"])
+        voucher_9500_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_9500"])
+        voucher_9750_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_9750"])
+        voucher_10000_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_10000"])
+        voucher_10250_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_10250"])
+        voucher_10500_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_10500"])
+        
+        mid_prices = {
+            "VOLCANIC_ROCK": rock_mid_price,
+            "VOLCANIC_ROCK_VOUCHER_9500": voucher_9500_mid_price,
+            "VOLCANIC_ROCK_VOUCHER_9750": voucher_9750_mid_price,
+            "VOLCANIC_ROCK_VOUCHER_10000": voucher_10000_mid_price,
+            "VOLCANIC_ROCK_VOUCHER_10250": voucher_10250_mid_price,
+            "VOLCANIC_ROCK_VOUCHER_10500": voucher_10500_mid_price,
+        }
+
+        
+        for symbol in self.symbols:
+            if symbol not in self.history:
+                self.history[symbol] = {}
+                self.history[symbol]["mid_price_history"] = deque(maxlen=self.time_window)
+            
+            self.history[symbol]["mid_price_history"].append(mid_prices[symbol])
+        
+        for symbol in self.symbols:
+            if len(self.history[symbol]["mid_price_history"]) > self.time_window:
+                self.history[symbol]["mid_price_history"] = self.history[symbol]["mid_price_history"][-self.time_window:]
+
+
+    def save_state(self, state):
+        pass
+
+
+
+
 class Config:
     def __init__(self):
         self.PRODUCT_CONFIG = {
@@ -1008,7 +1285,20 @@ class Config:
                 "delta1_threshold": 10,
                 "delta2_threshold": 10,
                 "time_window": 100
-
+            },
+            "VOLCANIC_ROCK_GROUP":{
+                "strategy_cls": VolcanicRockStrategy,
+                "symbols": ["VOLCANIC_ROCK", "VOLCANIC_ROCK_VOUCHER_9500", "VOLCANIC_ROCK_VOUCHER_9750", "VOLCANIC_ROCK_VOUCHER_10000", "VOLCANIC_ROCK_VOUCHER_10250", "VOLCANIC_ROCK_VOUCHER_10500"],
+                "position_limits": {
+                    "VOLCANIC_ROCK": 400,
+                    "VOLCANIC_ROCK_VOUCHER_9500": 200,
+                    "VOLCANIC_ROCK_VOUCHER_9750": 200,
+                    "VOLCANIC_ROCK_VOUCHER_10000": 200,
+                    "VOLCANIC_ROCK_VOUCHER_10250": 200,
+                    "VOLCANIC_ROCK_VOUCHER_10500": 200,
+                },
+                "threshold": 2, #价差阈值
+                "time_window": 100,
             }
         }
 
@@ -1040,11 +1330,11 @@ class Trader:
         orders = {}
         new_trader_data = {}
         for product, strategy in self.strategies.items():
-            if product in trader_data or product == "PICNIC_BASKET_GROUP":
+            if product in trader_data or product == "PICNIC_BASKET_GROUP" or product == "VOLCANIC_ROCK_GROUP":
                 strategy.load_state(state)
-            if product in state.order_depths or product == "PICNIC_BASKET_GROUP":
+            if product in state.order_depths or product == "PICNIC_BASKET_GROUP" or product == "VOLCANIC_ROCK_GROUP":
                 product_orders, strategy_state = strategy.run(state)
-                # 处理basket订单（包括basket1, basket2, croissants, jams, djembes）
+                # 处理group订单
                 if isinstance(product_orders, dict):
                     for symbol, symbol_orders in product_orders.items():
                         if symbol not in orders:
