@@ -133,7 +133,7 @@ class Strategy(ABC):
         self.position_limit = position_limit
         self.trader_data = {}
 
-    @abstractmethod
+
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         """计算标的物公允价格"""
         raise NotImplementedError
@@ -142,7 +142,8 @@ class Strategy(ABC):
     def generate_orders(self, state: TradingState) -> List[Order]:
         """生成订单逻辑"""
         raise NotImplementedError
-
+    
+    @abstractmethod
     def run(self, state: TradingState) -> Tuple[List[Order], dict]:
         """执行策略主逻辑"""
 
@@ -1139,6 +1140,36 @@ class BasketStrategy(Strategy):
             except Exception as e:
                 logger.print(f"Error loading state: {str(e)}")
 
+class VolcanicRockStrategy(Strategy):
+    def __init__(self, symbols: List[str], position_limits: dict):
+        # 使用第一个symbol作为虚拟主产品
+        super().__init__(symbols[0], position_limits[symbols[0]])
+
+        self.symbols = symbols
+        self.position_limits = position_limits
+
+
+
+    
+    def generate_orders(self, state: TradingState) -> Dict[Symbol, List[Order]]:
+        orders = {}
+        strategy_map = {
+            "VOLCANIC_ROCK": self.generate_orders_volcanic_rock,
+            "VOLCANIC_ROCK_VOUCHER_9500": self.generate_orders_volcanic_rock_voucher_9500,
+            "VOLCANIC_ROCK_VOUCHER_9750": self.generate_orders_volcanic_rock_voucher_9750,
+            "VOLCANIC_ROCK_VOUCHER_10000": self.generate_orders_volcanic_rock_voucher_10000,
+            "VOLCANIC_ROCK_VOUCHER_10250": self.generate_orders_volcanic_rock_voucher_10250,
+            "VOLCANIC_ROCK_VOUCHER_10500": self.generate_orders_volcanic_rock_voucher_10500,
+        }
+
+
+        for symbol in self.symbols:
+            if symbol in state.order_depths:
+                orders[symbol] = strategy_map[symbol](symbol, state)
+
+        return orders
+
+
 class Config:
     def __init__(self):
         self.PRODUCT_CONFIG = {
@@ -1178,7 +1209,18 @@ class Config:
                 "delta1_threshold": 10,
                 "delta2_threshold": 10,
                 "time_window": 100
-
+            },
+            "VOLCANIC_ROCK_GROUP":{
+                "strategy_cls": VolcanicRockStrategy,
+                "symbols": ["VOLCANIC_ROCK", "VOLCANIC_ROCK_VOUCHER_9500", "VOLCANIC_ROCK_VOUCHER_9750", "VOLCANIC_ROCK_VOUCHER_10000", "VOLCANIC_ROCK_VOUCHER_10250", "VOLCANIC_ROCK_VOUCHER_10500"],
+                "position_limits": {
+                    "VOLCANIC_ROCK": 400,
+                    "VOLCANIC_ROCK_VOUCHER_9500": 200,
+                    "VOLCANIC_ROCK_VOUCHER_9750": 200,
+                    "VOLCANIC_ROCK_VOUCHER_10000": 200,
+                    "VOLCANIC_ROCK_VOUCHER_10250": 200,
+                    "VOLCANIC_ROCK_VOUCHER_10500": 200,
+                },
             }
         }
 
