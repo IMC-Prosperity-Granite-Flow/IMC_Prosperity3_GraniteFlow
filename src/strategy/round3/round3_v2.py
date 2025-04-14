@@ -1081,7 +1081,7 @@ class VolcanicRockStrategy(Strategy):
         Xty = X.T @ iv
         beta = np.linalg.inv(XtX) @ Xty
         
-        return beta
+        return list(beta)
 
     def compute_call_delta(self, S, K, T, sigma):
         if T <= 0 or sigma <= 0:
@@ -1183,17 +1183,23 @@ class VolcanicRockStrategy(Strategy):
 
             logger.print(f"current symbol {self.symbols[i]}, mid_price {mid_price}, fair_price {fair_price}")
             logger.print(f"delta_p {delta_p}, option_delta {option_delta}")
-            if delta_p > self.threshold and position < limit:
-                volume = min(limit - position, 1)
-                buy_price = int(mid_price + 1)
-                orders_for_symbol.append(Order(self.symbols[i], buy_price, volume))
-                total_delta_exposure += option_delta * volume
 
-            elif delta_p < -self.threshold and position > -limit:
-                volume = min(position + limit, 1)
-                sell_price = int(mid_price - 1)
-                orders_for_symbol.append(Order(self.symbols[i], sell_price, -volume))
-                total_delta_exposure -= option_delta * volume
+            for price, amount in order_depth.buy_orders.items():
+                if price > fair_price + 1 and position - amount > -limit:
+                    if self.symbols[i] not in orders:
+                        orders[self.symbols[i]] = []
+                    orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
+                    position -= amount
+                    total_delta_exposure += delta_p * amount * -1
+
+            for price, amount in order_depth.sell_orders.items():
+                if price < fair_price - 1 and position + amount < limit:
+                    if self.symbols[i] not in orders:
+                        orders[self.symbols[i]] = []
+                    orders[self.symbols[i]].append(Order(self.symbols[i], price,  amount))
+                    position += amount
+                    total_delta_exposure += delta_p * amount
+        
 
             if orders_for_symbol:
                 orders[self.symbols[i]] = orders_for_symbol
