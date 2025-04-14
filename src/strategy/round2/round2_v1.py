@@ -544,12 +544,11 @@ class SquidInkStrategy(Strategy):
                 order_depth = state.order_depths[self.symbol]
                 current_position = state.position.get(self.symbol, 0)
                 max_position = self.position_limit
-                logger.print(
-                    f"fair_value: {fair_value}, current_position: {current_position}, max_position: {max_position}")
+                #logger.print(f"fair_value: {fair_value}, current_position: {current_position}, max_position: {max_position}")
 
                 available_buy = max(0, max_position - current_position)
                 available_sell = max(0, max_position + current_position)
-                logger.print(f"available_buy: {available_buy}, available_sell: {available_sell}")
+                #logger.print(f"available_buy: {available_buy}, available_sell: {available_sell}")
 
                 # 处理卖单（asks）的限价单
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
@@ -559,7 +558,7 @@ class SquidInkStrategy(Strategy):
                             orders.append(Order(self.symbol, ask_price, quantity))
                             available_buy -= quantity
                             eat_pos1 += quantity
-                            logger.print(f"buy {quantity} at {ask_price}")
+                            #logger.print(f"buy {quantity} at {ask_price}")
 
                 # 处理买单（bids）的限价单
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
@@ -569,7 +568,7 @@ class SquidInkStrategy(Strategy):
                             orders.append(Order(self.symbol, bid_price, -quantity))
                             available_sell -= quantity
                             eat_pos2 += quantity
-                            logger.print(f"sell {quantity} at {bid_price}")
+                            #logger.print(f"sell {quantity} at {bid_price}")
 
                 # 计算挂单价格
                 buy_price = math.floor(ma_100 - self.take_spread)
@@ -609,7 +608,7 @@ class SquidInkStrategy(Strategy):
                         max_amount = min(-amount, self.position_limit - current_position)
                         if max_amount > 0:
                             orders.append(Order(self.symbol, price, max_amount))
-                            logger.print(f"Up break, buy {max_amount} at {price}")
+                            #logger.print(f"Up break, buy {max_amount} at {price}")
 
                 if self.direction == -1:
                     # 突破是向下的，先做空
@@ -617,7 +616,7 @@ class SquidInkStrategy(Strategy):
                         max_amount = min(amount, self.position_limit + current_position)
                         if max_amount > 0:
                             orders.append(Order(self.symbol, price, -max_amount))
-                            logger.print(f"Down break, sell {max_amount} at {price}")
+                            #logger.print(f"Down break, sell {max_amount} at {price}")
 
                 self.current_mode = "trend_following"
 
@@ -631,13 +630,12 @@ class SquidInkStrategy(Strategy):
             position = state.position.get(self.symbol, 0)
 
             # 判断价格是否回归
-            logger.print(
-                f"Current distance: {(fair_value - self.breakout_price) * self.direction}")
+            ##logger.print(f"Current distance: {(fair_value - self.breakout_price) * self.direction}")
             # 回归就清仓
             if (fair_value - self.breakout_price) * self.direction < 0:
-                logger.print(f"Fall back! {fair_value}")
+                #logger.print(f"Fall back! {fair_value}")
                 if position != 0:
-                    logger.print(f"Close position {position}")
+                    #logger.print(f"Close position {position}")
                     if self.direction == 1:
                         # 突破是向上的，平空
                         max_amount = min(best_bid_amount, -position)
@@ -662,7 +660,7 @@ class SquidInkStrategy(Strategy):
                 # 先检查仓位有没有反向吃满，如果没有则先吃满。注意只能做一次，不然会反复反向吃满
                 if position * self.direction < self.position_limit and not self.prepared_reverse:
                     logger.print(f"Preparing reverse, current position {position}, direction {self.direction}")
-                    logger.print(f"{self.position_limit - position} to fill")
+                    #logger.print(f"{self.position_limit - position} to fill")
                     if self.direction == 1:
                         # 突破是向上的，先做多
                         for price, amount in sorted(order_depth.sell_orders.items()):
