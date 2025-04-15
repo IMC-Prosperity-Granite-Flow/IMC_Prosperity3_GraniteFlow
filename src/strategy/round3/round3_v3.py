@@ -1194,7 +1194,7 @@ class VolcanicRockStrategy(Strategy):
             logger.print(f"delta_p {delta_p}, option_delta {option_delta}")
 
             for price, amount in order_depth.buy_orders.items():
-                if price > fair_price and position - amount > -limit:
+                if price > fair_price + 1 and position - amount > -limit:
                     if self.symbols[i] not in orders:
                         orders[self.symbols[i]] = []
                     orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
@@ -1202,12 +1202,13 @@ class VolcanicRockStrategy(Strategy):
                     total_delta_exposure += delta_p * amount * -1
 
             for price, amount in order_depth.sell_orders.items():
-                if price < fair_price and position + amount < limit:
+                if price < fair_price - 1 and position - amount < limit:
                     if self.symbols[i] not in orders:
                         orders[self.symbols[i]] = []
-                    orders[self.symbols[i]].append(Order(self.symbols[i], price,  amount))
-                    position += amount
-                    total_delta_exposure += delta_p * amount
+                    orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
+                    logger.print(f"{self.symbols[i]}: ")
+                    position -= amount
+                    total_delta_exposure += delta_p * amount * -1
         
 
             if orders_for_symbol:
