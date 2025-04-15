@@ -1013,17 +1013,10 @@ class VolcanicRockStrategy(Strategy):
         # 计算买卖方加权均价
         buy_sum, buy_volume = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
         sell_sum, sell_volume = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
-
-        if buy_volume == 0 and sell_volume == 0:
-            mid_price = 0
-        elif buy_volume == 0:
-            mid_price = sell_sum/sell_volume
-        elif sell_volume == 0:
-            mid_price = buy_sum/buy_volume
+        if buy_volume + sell_volume == 0:
+            return 0
         else:
-            mid_price = (buy_sum/buy_volume + sell_sum/sell_volume) / 2
-        # 返回中间价
-        return mid_price
+            return (buy_sum + sell_sum) / (buy_volume + sell_volume)
 
     @staticmethod
     def norm_cdf(x: float) -> float:
@@ -1072,15 +1065,15 @@ class VolcanicRockStrategy(Strategy):
         return 0.5 * (low + high)
     
     @staticmethod
-    def fit_vol_surface(K, iv):
-        K = np.array(K)/10000
+    def fit_vol_surface(m, iv):
+        m = np.array(m)
         iv = np.array(iv)
         
         # 构造设计矩阵 X: [1, K, K^2]
         X = np.column_stack([
-            np.ones_like(K),    # 常数项 β0
-            K,                  # β1
-            K**2,               # β2
+            np.ones_like(m),    # 常数项 β0
+            m,                  # β1
+            m**2,               # β2
         ])
         
         # 最小二乘解 β = (X^T X)^(-1) X^T y
@@ -1114,12 +1107,14 @@ class VolcanicRockStrategy(Strategy):
                 if (iv == 0.001) or (iv == 0.8):
                     beta_update = False
             self.ivs.append(iv)
+        
+        m = np.log(np.array(self.K)/current_S)/np.sqrt(self.T)
 
         if beta_update:
-            self.betas = self.fit_vol_surface(self.K, self.ivs)
+            self.betas = self.fit_vol_surface(m, self.ivs)
 
 
-        striks = np.array(self.K)/10000
+        striks = np.array(m)
         X = np.column_stack([
             np.ones_like(striks),    # 常数项 β0
             striks,                  # β1
