@@ -138,7 +138,6 @@ class Strategy(ABC):
         """计算标的物公允价格"""
         raise NotImplementedError
 
-    @abstractmethod
     def generate_orders(self, state: TradingState) -> List[Order]:
         """生成订单逻辑"""
         raise NotImplementedError
@@ -1467,7 +1466,7 @@ class Config:
                     "VOLCANIC_ROCK_VOUCHER_10250": 200,
                     "VOLCANIC_ROCK_VOUCHER_10500": 200,
                 },
-                "threshold": 2,
+                "threshold": 10,
                 "time_window": 100,
             }
         }
