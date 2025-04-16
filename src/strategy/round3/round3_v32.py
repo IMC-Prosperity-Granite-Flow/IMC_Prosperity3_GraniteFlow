@@ -763,11 +763,10 @@ class BasketStrategy(Strategy):
         current_diff = price_diffs[basket]
         # 添加长度检查，避免IndexError
         entry_diff = self.price_diff_history[basket][-2] if len(self.price_diff_history[basket]) >= 2 else current_diff
-        stop_loss_threshold = entry_diff * 2  # 例如，价差翻倍则止损
+        stop_loss_threshold = entry_diff * 1.2  # 例如，价差翻倍则止损
 
         if (current_diff < 0 and current_diff < stop_loss_threshold) or (
                 current_diff > 0 and current_diff > stop_loss_threshold):
-            logger.print(f"------------------{basket} current_diff {current_diff:.2f}---entry_diff--- {entry_diff:.2f}")
             # 平仓逻辑：反向操作当前仓位
             position = state.position.get(basket, 0)
             if position != 0:
@@ -809,27 +808,6 @@ class BasketStrategy(Strategy):
 
                 # 相关性过滤器: 相关性低于阈值时不开新仓
                 if ewma_corr < self.min_correlation_threshold and current_position == 0:
-                    # if remaining_buy != 0 and remaining_sell != 0:
-                    #     best_bid = max(state.order_depths[basket].buy_orders.keys()) if state.order_depths[
-                    #             basket].buy_orders else 0
-                    #     best_ask = min(state.order_depths[basket].sell_orders.keys()) if state.order_depths[
-                    #             basket].sell_orders else 0
-                    #     fair_value = self.calculate_fair_value(state.order_depths[basket])
-                    #     desired_bid = best_bid + 1
-                    #     if desired_bid >= fair_value:
-                    #         desired_bid = math.floor(fair_value)
-                    #
-                    #     desired_ask = best_ask - 1
-                    #     if desired_ask <= fair_value:
-                    #         desired_ask = math.ceil(fair_value)
-                    #
-                    #     basket_orders = []
-                    #     if remaining_buy > 0 and remaining_sell > 0:
-                    #         basket_orders.append(Order(basket, desired_bid, remaining_buy))
-                    #     if remaining_sell > 0:
-                    #         basket_orders.append(Order(basket, desired_ask, -remaining_sell))
-                    #
-                    #     orders.extend(basket_orders)
                     continue
 
                 # 执行买入
@@ -843,8 +821,6 @@ class BasketStrategy(Strategy):
                         buyable = min(remaining_buy, -volume)
                         if buyable > 0:
                             basket_orders.append(Order(basket, price, buyable))
-                            logger.print(
-                                f"BUY {basket}: {buyable} @ {price} (相关性: {ewma_corr:.2f})")
                             remaining_buy -= buyable
                             if remaining_buy <= 0:
                                 break
@@ -863,8 +839,6 @@ class BasketStrategy(Strategy):
                         sellable = min(remaining_sell, volume)
                         if sellable > 0:
                             basket_orders.append(Order(basket, price, -sellable))
-                            logger.print(
-                                f"SELL {basket}: {sellable} @ {price} (相关性: {ewma_corr:.2f})")
                             remaining_sell -= sellable
                             if remaining_sell <= 0:
                                 break
@@ -1142,6 +1116,7 @@ class BasketStrategy(Strategy):
 
         return new_corr
 
+
 class VolcanicRockStrategy(Strategy):
     def __init__(self, symbols: List[str], position_limits: dict, time_window: int , iv_threshold: float):
         # 使用第一个symbol作为虚拟主产品
@@ -1153,7 +1128,7 @@ class VolcanicRockStrategy(Strategy):
         self.iv_positive_threshold = iv_threshold
         self.iv_negative_threshold = -iv_threshold
         self.history = {}
-        self.T = 8/365
+        self.T = 5/365
         self.timestamp_high = 1000000
         self.timestamp_unit = 100
         self.betas = []
