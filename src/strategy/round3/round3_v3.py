@@ -985,6 +985,7 @@ class VolcanicRockStrategy(Strategy):
         self.raw_ivs = []
         self.ivs = []
         self.base_ivs = deque(maxlen = time_window)
+        self.outlier_times = 0
 
     #工具函数
 
@@ -1076,7 +1077,7 @@ class VolcanicRockStrategy(Strategy):
         XtX = X.T @ X
         Xty = X.T @ iv
         beta = np.linalg.inv(XtX) @ Xty
-        
+
         return list(beta)
 
     def compute_call_delta(self, S, K, T, sigma):
@@ -1087,7 +1088,9 @@ class VolcanicRockStrategy(Strategy):
     
 
     def calculate_fair_value(self):
-        """利用bs模型和波动率曲线拟合定价"""
+        """
+        利用bs模型和波动率曲线拟合定价
+        """
         beta_update = True
         self.ivs = []
 
@@ -1120,9 +1123,21 @@ class VolcanicRockStrategy(Strategy):
         ])
 
         iv_fitted =  X @ self.betas
-        self.ivs = iv_fitted
 
-        fair_prices = [self.bs_call_price(current_S, self.K[i], self.T, sigma=iv_fitted[i]) for i in range(len(self.symbols) - 1)]
+        #平移修正iv_fitted
+        base_iv = self.betas[0] #利用截距计算base_iv
+        self.base_ivs.append(base_iv)
+        
+        scaled_rock_prices = (-5) * (self.history['VOLCANIC_ROCK']['mid_price_history'] / np.mean(self.history['VOLCANIC_ROCK']['mid_price_history']) - 1)
+        scaled_base_ivs = (self.base_ivs / np.mean(self.base_ivs) - 1)
+
+        #用scaled_rock_prices 作为base_iv的平均线
+        base_iv_diff = scaled_base_ivs[-1] - scaled_rock_prices[-1]
+        #logger.print(f"base_iv_diff: {base_iv_diff}")
+        base_iv_diff = 0 #暂时不平移
+        self.ivs = [iv - base_iv_diff for iv in iv_fitted]
+
+        fair_prices = [self.bs_call_price(current_S, self.K[i], self.T, sigma=self.ivs[i]) for i in range(len(self.symbols) - 1)]
 
         return fair_prices
 
@@ -1156,19 +1171,9 @@ class VolcanicRockStrategy(Strategy):
         """
         orders = {}
         total_delta_exposure = 0.0  # 用局部变量，不要用 self 记录，避免多次调用累加错
+
         fair_prices = self.calculate_fair_value()
 
-        base_iv = self.betas[0] #利用截距计算base_iv
-        self.base_ivs.append(base_iv)
-        
-        scaled_rock_prices = (-5) * (self.history['VOLCANIC_ROCK']['mid_price_history'] / np.mean(self.history['VOLCANIC_ROCK']['mid_price_history']) - 1)
-        scaled_base_ivs = (self.base_ivs / np.mean(self.base_ivs) - 1)
-        #用scaled_rock_prices 作为base_iv的平均线
-        base_iv_diff = scaled_base_ivs[-1] - scaled_rock_prices[-1]
-        logger.print(f"base_iv_diff: {base_iv_diff}")
-
-        #平移修正iv_fitted
-        self.ivs = [iv - base_iv_diff for iv in self.ivs]
 
         for i in range(1, len(self.symbols)):
             order_depth = state.order_depths[self.symbols[i]]
@@ -1188,7 +1193,7 @@ class VolcanicRockStrategy(Strategy):
             sigma = self.ivs[i - 1]
             raw_iv = self.raw_ivs[i - 1]
 
-            logger.print(f"symbol: {self.symbols[i]}, delta_p: {delta_p}, delta_iv: {sigma - raw_iv}")
+            #logger.print(f"symbol: {self.symbols[i]}, delta_p: {delta_p}, delta_iv: {sigma - raw_iv}")
             
             # None check
             if mid_price is None or fair_price is None or S is None or sigma is None:
@@ -1196,24 +1201,30 @@ class VolcanicRockStrategy(Strategy):
 
             option_delta = self.compute_call_delta(S, K, T, sigma)
 
-
             for price, amount in order_depth.buy_orders.items():
-                if price > fair_price + 1 and position - amount > -limit:
+                if price > fair_price + 1: #卖出
                     if self.symbols[i] not in orders:
                         orders[self.symbols[i]] = []
+
+                    amount = min(amount, position + limit)
+                    #根据价差比例下单
+                    #amount = int(min(abs(price - fair_price - 1)/ 0.5, 1) * amount)
                     orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount)) #卖出
                     position -= amount
                     total_delta_exposure += option_delta * amount * -1
 
             for price, amount in order_depth.sell_orders.items():
-                if price < fair_price - 1 and position - amount < limit:
+                if price < fair_price - 1:
                     if self.symbols[i] not in orders:
                         orders[self.symbols[i]] = []
+
+                    amount = -min(-amount, limit - position)
+
+                    #amount = int(min(abs(fair_price - 1 - price)/ 0.5, 1) * amount)
                     orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount)) #买入
                     position += amount
                     total_delta_exposure += option_delta * (-amount)
         
-
             if orders_for_symbol:
                 orders[self.symbols[i]] = orders_for_symbol
 
@@ -1248,6 +1259,9 @@ class VolcanicRockStrategy(Strategy):
     
 
     def generate_orders_delta_hedge(self, state: TradingState, total_delta_exposure: float) -> List[Order]:
+        if self.betas[2] < 0:
+            self.outlier_times += 1
+        logger.print(f"outlier_times: {self.outlier_times}")
         orders = []
         symbol = "VOLCANIC_ROCK"
         position = state.position.get(symbol, 0)
@@ -1280,7 +1294,8 @@ class VolcanicRockStrategy(Strategy):
 
         arbitrage_orders, total_delta_exposure = self.generate_orders_fair_value_arbitrage(state)
         hedge_orders = self.generate_orders_delta_hedge(state, total_delta_exposure + current_delta)
-
+        
+        hedge_orders = [] #先不交易rock
         orders.update(arbitrage_orders)
         if hedge_orders:
             orders["VOLCANIC_ROCK"] = hedge_orders
