@@ -198,16 +198,7 @@ class KelpStrategy(Strategy):
         # 计算买卖方加权均价
         buy_avg = weighted_avg(order_depth.buy_orders)
         sell_avg = weighted_avg(order_depth.sell_orders)
-
-        # 返回中间价
-        if buy_avg and sell_avg:
-            return (buy_avg + sell_avg) / 2
-        elif buy_avg:
-            return buy_avg
-        elif sell_avg:
-            return sell_avg
-        else:
-            return 0
+        return (buy_avg + sell_avg) / 2
 
     def generate_orders(self, state: TradingState) -> List[Order]:
         take_position1 = 0
@@ -280,8 +271,6 @@ class KelpStrategy(Strategy):
                 desired_bid = math.floor(fair_value)  # 保持最高价格保护
 
         # 根据持仓和方向调整挂单量
-        # desired_buy = min(15, available_buy - take_position1)
-        # desired_sell = min(15, available_sell - take_position2)
         desired_buy = available_buy - take_position1
         desired_sell = available_sell - take_position2
 
@@ -556,7 +545,7 @@ class BasketStrategy(Strategy):
         self.delta1_threshold = delta1_threshold
         self.delta2_threshold = delta2_threshold
         self.time_window = time_window
-        self.std_multiplier = 2
+        self.std_multiplier = 1.4
 
         # 记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
         self.position_history = {symbol: [] for symbol in self.symbols}
@@ -594,12 +583,6 @@ class BasketStrategy(Strategy):
 
         # 组件价格缓存
         self.component_prices = {}
-
-        # 篮子特定交易参数（标准差倍数）- PB1使用更保守的参数
-        self.std_thresholds = {
-            'PICNIC_BASKET1': 3.5,  # 更保守，防止亏损
-            'PICNIC_BASKET2': 2.0  # 更激进，提高盈利
-        }
 
         # 最小标准差阈值，防止初期过度交易
         self.min_std_threshold = 10.0
@@ -801,10 +784,6 @@ class BasketStrategy(Strategy):
                 # 获取当前EWMA相关性
                 ewma_corr = self.ewma_correlation.get(basket, 0.8)
 
-                # 相关性过滤器: 相关性低于阈值时不开新仓
-                if ewma_corr < self.min_correlation_threshold and current_position == 0:
-                    continue
-
                 # 计算可用交易额度
                 available_buy = max(0, position_limit - current_position)
                 available_sell = max(0, position_limit + current_position)
@@ -816,6 +795,8 @@ class BasketStrategy(Strategy):
 
                 buy_signal = False
                 sell_signal = False
+                remaining_buy = max_buy_volume
+                remaining_sell = max_sell_volume
 
                 # 计算交易信号 - 使用篮子特定的标准差阈值
                 if basket == 'PICNIC_BASKET1':
@@ -826,14 +807,37 @@ class BasketStrategy(Strategy):
                     buy_signal = price_diffs[basket] < -40  # 篮子低估，买入信号
                     sell_signal = price_diffs[basket] > -2  # 篮子高估，卖出信号
 
+                # 相关性过滤器: 相关性低于阈值时不开新仓
+                if ewma_corr < self.min_correlation_threshold and current_position == 0:
+                    # if remaining_buy != 0 and remaining_sell != 0:
+                    #     best_bid = max(state.order_depths[basket].buy_orders.keys()) if state.order_depths[
+                    #             basket].buy_orders else 0
+                    #     best_ask = min(state.order_depths[basket].sell_orders.keys()) if state.order_depths[
+                    #             basket].sell_orders else 0
+                    #     fair_value = self.calculate_fair_value(state.order_depths[basket])
+                    #     desired_bid = best_bid + 1
+                    #     if desired_bid >= fair_value:
+                    #         desired_bid = math.floor(fair_value)
+                    #
+                    #     desired_ask = best_ask - 1
+                    #     if desired_ask <= fair_value:
+                    #         desired_ask = math.ceil(fair_value)
+                    #
+                    #     basket_orders = []
+                    #     if remaining_buy > 0 and remaining_sell > 0:
+                    #         basket_orders.append(Order(basket, desired_bid, remaining_buy))
+                    #     if remaining_sell > 0:
+                    #         basket_orders.append(Order(basket, desired_ask, -remaining_sell))
+                    #
+                    #     orders.extend(basket_orders)
+                    continue
+
                 # 执行买入
                 if buy_signal and max_buy_volume > 0 and basket in state.order_depths:
                     # 找出最佳卖价
                     sell_orders = sorted(state.order_depths[basket].sell_orders.items())
                     basket_orders = []
 
-                    # 遍历所有卖单，从最低价开始吃单
-                    remaining_buy = max_buy_volume
                     for price, volume in sell_orders:
                         # 卖单的volume是负数
                         buyable = min(remaining_buy, -volume)
@@ -854,7 +858,6 @@ class BasketStrategy(Strategy):
                     basket_orders = []
 
                     # 遍历所有买单，从最高价开始吃单
-                    remaining_sell = max_sell_volume
                     for price, volume in buy_orders:
                         # 买单的volume是正数
                         sellable = min(remaining_sell, volume)
@@ -902,7 +905,7 @@ class BasketStrategy(Strategy):
 
         # 计算阈值调整系数
         if ewma_corr > 0.9:
-            threshold_factor = 0.8  # 相关性高，降低阈值更积极交易
+            threshold_factor = 0.6  # 相关性高，降低阈值更积极交易
         elif ewma_corr < 0.85:
             threshold_factor = 1.2  # 相关性低，提高阈值更保守交易
         else:
@@ -993,6 +996,7 @@ class BasketStrategy(Strategy):
 
     def generate_orders_djembes(self, symbol: str, state: TradingState) -> List[Order]:
         orders = []
+
         if len(self.delta1_history) >= self.std_window:
             # 确保delta1_history不为空
             delta1 = self.delta1_history[-1] if self.delta1_history else 0
@@ -1152,6 +1156,9 @@ class VolcanicRockStrategy(Strategy):
         self.ma_80 = 0
         self.time_counter = 0
         self.active_direction = 0
+        self.up_close_value = 120
+        self.down_close_value = 90
+
 
         self.voucher_config = {
             "VOLCANIC_ROCK_VOUCHER_9500": {
@@ -1259,63 +1266,61 @@ class VolcanicRockStrategy(Strategy):
         time_value = self.calculate_time_value(current_atm, self.ma_80, atm_price)
 
         # 如果当前是Normal模式
-        if self.current_mode == "Normal":
-            if time_value < 90:
+        if self.current_mode =="Normal":
+            if time_value < 99:
                 self.current_mode = "Abnormal"
                 self.active_atm = current_atm
                 self.active_time_value = time_value
                 self.active_direction = -1
                 # 卖出标的资产
-                qty = (self.position_limit + rock_position) // 3
+                qty = self.position_limit + rock_position
                 if qty > 0 and rock_order_depth.buy_orders:
                     best_bid = min(rock_order_depth.buy_orders.keys())
                     best_bid_amount = rock_order_depth.buy_orders[best_bid]
-                    sell_qty = min(best_bid_amount, qty)
+                    sell_qty = min(50,best_bid_amount, qty)
                     orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -round(sell_qty))]
                 # 卖出低行权价凭证
                 active_strike = self.voucher_config[current_atm]["strike"]
                 for symbol in self.voucher_config:
-                    if self.voucher_config[symbol]["strike"] < active_strike:
+                    if self.voucher_config[symbol]["strike"] <= active_strike:
                         depth = state.order_depths.get(symbol, OrderDepth())
                         if not depth.buy_orders:
                             continue
                         best_bid = min(depth.buy_orders.keys())
                         best_bid_amount = depth.buy_orders[best_bid]
-                        pos_limit = self.voucher_config[symbol]["position_limit"]
                         current_pos = state.position.get(symbol, 0)
-                        available_sell = pos_limit + current_pos
+                        available_sell = 200 + current_pos
                         if available_sell > 0:
-                            sell_qty = min(best_bid_amount, available_sell // 3)
+                            sell_qty = min(best_bid_amount, available_sell)
                             if symbol not in orders:
                                 orders[symbol] = []
                             orders[symbol].append(Order(symbol, best_bid, -round(sell_qty)))
                 return orders
-            if time_value > 110:
+            elif time_value > 111:
                 self.current_mode = "Abnormal"
                 self.active_atm = current_atm
                 self.active_time_value = time_value
                 self.active_direction = 1
                 # 买入标的资产
-                qty = (self.position_limit - rock_position) // 3
+                qty = self.position_limit - rock_position
                 if qty > 0 and rock_order_depth.sell_orders:
                     best_ask = min(rock_order_depth.sell_orders.keys())
                     best_ask_amount = rock_order_depth.sell_orders[best_ask]
-                    buy_qty = min(-best_ask_amount, qty)
+                    buy_qty = min(50,-best_ask_amount, qty)
                     orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, round(buy_qty))]
                 # 买入低行权价凭证
                 active_strike = self.voucher_config[current_atm]["strike"]
                 for symbol in self.voucher_config:
-                    if self.voucher_config[symbol]["strike"] < active_strike:
+                    if self.voucher_config[symbol]["strike"] <= active_strike:
                         depth = state.order_depths.get(symbol, OrderDepth())
                         if not depth.sell_orders:
                             continue
                         best_ask = min(depth.sell_orders.keys())
                         best_ask_amount = depth.sell_orders[best_ask]
-                        pos_limit = self.voucher_config[symbol]["position_limit"]  # 正确获取方式
                         current_pos = state.position.get(symbol, 0)
-                        available_buy = pos_limit - current_pos
+                        available_buy = 200 - current_pos
                         if available_buy > 0:
-                            buy_qty = abs(min(-best_ask_amount, available_buy // 3))
+                            buy_qty = min(-best_ask_amount, available_buy)
                             if symbol not in orders:
                                 orders[symbol] = []
                             orders[symbol].append(Order(symbol, best_ask, round(buy_qty)))
@@ -1330,41 +1335,48 @@ class VolcanicRockStrategy(Strategy):
                 current_tv = self.calculate_time_value(current_atm, self.ma_80, atm_price)
                 # 继续卖出标的
                 if current_tv < self.active_time_value:
-                    qty = (0.5 * self.position_limit + rock_position) // 2
-                    if qty > 0 and rock_order_depth.buy_orders:
+                    self.active_time_value = current_tv
+                    available_sell = 400 + rock_position
+                    if available_sell > 0 and rock_order_depth.buy_orders:
                         best_bid = min(rock_order_depth.buy_orders.keys())
-                        orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -round(qty))]
+                        best_bid_amount = rock_order_depth.buy_orders[best_bid]
+                        sell_qty = min(50, best_bid_amount, math.floor(0.3*available_sell))
+                        orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -math.floor(sell_qty))]
 
                     for symbol in self.voucher_config:
                         active_strike = self.voucher_config[current_atm]["strike"]
-                        if self.voucher_config[symbol]["strike"] < active_strike:
+                        if self.voucher_config[symbol]["strike"] <= active_strike:
                             depth = state.order_depths.get(symbol, OrderDepth())
                             if not depth.buy_orders:
                                 continue
                             best_bid = min(depth.buy_orders.keys())
-                            pos_limit = self.voucher_config[symbol]["position_limit"]  # 正确获取方式
+                            best_bid_amount = depth.buy_orders[best_bid]
                             current_pos = state.position.get(symbol, 0)
-                            sell_qty = (0.5 * pos_limit + current_pos) // 2
+                            available_sell = 200 + current_pos
+                            sell_qty = min(best_bid_amount, math.floor(0.3*available_sell))
                             if sell_qty > 0:
                                 if symbol not in orders:
                                     orders[symbol] = []
-                                orders[symbol].append(Order(symbol, best_bid, -round(sell_qty)))
+                                orders[symbol].append(Order(symbol, best_bid, -sell_qty))
                     return orders
                 # 平仓逻辑
-                elif current_tv > 120:
-                    # 平仓标的资产
+                elif current_tv > self.up_close_value:
+                    # 买入平仓标的资产
                     total_position = rock_position  # 初始化总持仓计算
                     if rock_position < 0:
                         if rock_order_depth.sell_orders:
                             best_ask = max(rock_order_depth.sell_orders.keys())
                             best_ask_amount = rock_order_depth.sell_orders[best_ask]
-                            available_buy = self.position_limit - rock_position
+                            available_buy = 400 - rock_position
                             if available_buy > 0:
-                                buy_qty = min(-best_ask_amount, math.floor(0.3 * available_buy))
+                                buy_qty = min(50, -best_ask_amount, math.floor(0.3*available_buy))
                                 orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, round(buy_qty))]
                     for symbol in self.voucher_config:
                         current_pos = state.position.get(symbol, 0)
-                        total_position += current_pos
+                        if current_pos >= 0:
+                            continue
+                        else:
+                            total_position += current_pos
                         depth = state.order_depths.get(symbol, OrderDepth())
                         if not depth.sell_orders:
                             continue  # 需要处理无买单情况
@@ -1374,10 +1386,10 @@ class VolcanicRockStrategy(Strategy):
                         if symbol not in orders:
                             orders[symbol] = []
                         if available_buy > 0:
-                            buy_qty = min(-best_ask_amount, math.floor(0.3 * available_buy))
+                            buy_qty = min(-best_ask_amount, math.floor(0.3*available_buy))
                             orders[symbol].append(Order(symbol, best_ask, buy_qty))
                     # 严格检查所有仓位
-                    if total_position > 0:
+                    if total_position >= -40:
                         self.current_mode = "Normal"
                         self.active_atm = None
                         self.time_counter = 0
@@ -1385,49 +1397,52 @@ class VolcanicRockStrategy(Strategy):
                         self.active_direction = 0
                     return orders
 
-            if self.active_atm == current_atm and self.active_direction == 1:
+            elif self.active_atm == current_atm and self.active_direction == 1:
                 atm_depth = state.order_depths.get(current_atm, OrderDepth())
                 atm_price = self.calculate_mid_price(atm_depth)
                 current_tv = self.calculate_time_value(current_atm, self.ma_80, atm_price)
                 # 继续买入标的
                 if current_tv > self.active_time_value:
-                    qty = (0.5 * self.position_limit - rock_position) // 2
-                    if qty > 0 and rock_order_depth.sell_orders:
+                    self.active_time_value = current_tv
+                    availeble_buy = 400 - rock_position
+                    if availeble_buy > 0 and rock_order_depth.sell_orders:
                         best_ask = min(rock_order_depth.sell_orders.keys())
-                        orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, round(qty))]
+                        best_ask_amount = rock_order_depth.sell_orders[best_ask]
+                        buy_qty = min(50, best_ask_amount, math.floor(0.3*availeble_buy))
+                        orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, buy_qty)]
                     for symbol in self.voucher_config:
                         active_strike = self.voucher_config[current_atm]["strike"]
-                        if self.voucher_config[symbol]["strike"] < active_strike:
+                        if self.voucher_config[symbol]["strike"] <= active_strike:
                             depth = state.order_depths.get(symbol, OrderDepth())
                             if not depth.sell_orders:
                                 continue
                             best_ask = min(depth.sell_orders.keys())
-                            pos_limit = self.voucher_config[symbol]["position_limit"]  # 正确获取方式
+                            best_ask_amount = depth.sell_orders[best_ask]
                             current_pos = state.position.get(symbol, 0)
-                            buy_qty = (0.5 * pos_limit - current_pos) // 2
-                            if buy_qty > 0:
-                                if symbol not in orders:
-                                    orders[symbol] = []
-                                orders[symbol].append(Order(symbol, best_ask, round(buy_qty)))
+                            available_buy = 200 - current_pos
+                            buy_qty = min(-best_ask_amount, math.floor(0.3*available_buy))
+                            if symbol not in orders:
+                                orders[symbol] = []
+                            orders[symbol].append(Order(symbol, best_ask, buy_qty))
                     return orders
                 # 平仓逻辑
-                elif current_tv < 90:
-                    # 平仓标的资产
+                elif current_tv < self.down_close_value:
+                    # 卖出平仓标的资产
                     total_position = rock_position  # 初始化总持仓计算
-                    if rock_position != 0:
+                    if rock_position > 0:
                         if rock_order_depth.buy_orders:
                             best_bid = max(rock_order_depth.buy_orders.keys())
                             best_bid_amount = rock_order_depth.buy_orders[best_bid]
                             available_sell = self.position_limit + rock_position
                             if available_sell > 0:
-                                sell_qty = min(best_bid_amount, math.floor(0.3 * available_sell))
-                                orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -round(sell_qty))]
-                    # 平仓所有凭证
+                                sell_qty = min(50, best_bid_amount, math.floor(0.3*available_sell))
+                                orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -sell_qty)]
                     for symbol in self.voucher_config:
                         current_pos = state.position.get(symbol, 0)
-                        total_position += abs(current_pos)
-                        if current_pos == 0:
+                        if current_pos <= 0:
                             continue
+                        else:
+                            total_position += current_pos
                         depth = state.order_depths.get(symbol, OrderDepth())
                         if not depth.buy_orders:
                             continue  # 需要处理无买单情况
@@ -1437,10 +1452,10 @@ class VolcanicRockStrategy(Strategy):
                         if symbol not in orders:
                             orders[symbol] = []
                         if available_sell > 0:
-                            sell_qty = min(best_bid_amount, 0.3 * available_sell)
-                            orders[symbol].append(Order(symbol, best_bid, -round(sell_qty)))
+                            sell_qty = min(best_bid_amount, math.floor(0.3*available_sell))
+                            orders[symbol].append(Order(symbol, best_bid, -sell_qty))
                     # 严格检查所有仓位
-                    if total_position < -10:
+                    if total_position <= 40:
                         self.current_mode = "Normal"
                         self.active_atm = None
                         self.time_counter = 0
@@ -1448,7 +1463,7 @@ class VolcanicRockStrategy(Strategy):
                         self.active_direction = 0
                     return orders
 
-            if self.active_atm != current_atm and self.active_atm is not None and self.active_direction == -1:
+            elif self.active_atm != current_atm and self.active_atm is not None and self.active_direction == -1:
                 if self.voucher_config[current_atm]["strike"] < self.voucher_config[self.active_atm]["strike"]:
                     self.active_atm = current_atm
 
@@ -1462,30 +1477,30 @@ class VolcanicRockStrategy(Strategy):
                             best_ask_amount = rock_order_depth.sell_orders[best_ask]
                             bound = self.voucher_config[current_atm]["lower_bound"]
                             available_buy = self.position_limit - rock_position
-                            if available_buy > 0 and best_ask <= bound + 5:
-                                buy_qty = min(-best_ask_amount, math.floor(0.5 * available_buy))
-                                orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, round(buy_qty))]
+                            if available_buy > 0 and best_ask <= bound + 20:
+                                buy_qty = min(50, -best_ask_amount, math.floor(0.3*available_buy))
+                                orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, buy_qty)]
                                 # 止损所有凭证
                                 for symbol in self.voucher_config:
                                     current_pos = state.position.get(symbol, 0)
                                     if current_pos < 0:
                                         total_position += current_pos
-                                    if current_pos >= 0:
+                                    elif current_pos >= 0:
                                         continue
                                     depth = state.order_depths.get(symbol, OrderDepth())
                                     if not depth.sell_orders:
                                         continue  # 需要处理无买单情况
                                     best_ask = max(depth.sell_orders.keys())
                                     best_ask_amount = depth.sell_orders[best_ask]
-                                    available_buy = 200 - current_pos  # 正确平仓数量
+                                    available_buy = 200 - current_pos  # 平仓数量
                                     if symbol not in orders:
                                         orders[symbol] = []
                                     if available_buy > 0:
-                                        buy_qty = min(-best_ask_amount, 0.5 * available_buy)
-                                        orders[symbol].append(Order(symbol, best_ask, round(buy_qty)))
+                                        buy_qty = min(-best_ask_amount, math.floor(0.3*available_buy))
+                                        orders[symbol].append(Order(symbol, best_ask, buy_qty))
 
                     # 严格检查所有仓位
-                    if total_position >= -20 or self.time_counter == 30:
+                    if total_position >= -40 or self.time_counter == 15:
                         self.current_mode = "Normal"
                         self.active_atm = None
                         self.active_time_value = 0
@@ -1493,7 +1508,7 @@ class VolcanicRockStrategy(Strategy):
                         self.active_direction = 0
                     return orders
 
-            if self.active_atm != current_atm and self.active_atm is not None and self.active_direction == 1:
+            elif self.active_atm != current_atm and self.active_atm is not None and self.active_direction == 1:
                 if self.voucher_config[current_atm]["strike"] > self.voucher_config[self.active_atm]["strike"]:
                     self.active_atm = current_atm
 
@@ -1507,15 +1522,15 @@ class VolcanicRockStrategy(Strategy):
                             best_bid_amount = rock_order_depth.buy_orders[best_bid]
                             bound = self.voucher_config[current_atm]["upper_bound"]
                             available_sell = self.position_limit + rock_position
-                            if available_sell > 0 and best_bid >= bound - 5:
-                                sell_qty = min(best_bid_amount, math.floor(0.5 * available_sell))
-                                orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -round(sell_qty))]
+                            if available_sell > 0 and best_bid >= bound - 20:
+                                sell_qty = min(50, best_bid_amount, math.floor(0.3*available_sell))
+                                orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -sell_qty)]
                                 # 止损所有凭证
                                 for symbol in self.voucher_config:
                                     current_pos = state.position.get(symbol, 0)
                                     if current_pos > 0:
                                         total_position += current_pos
-                                    if current_pos <= 0:
+                                    elif current_pos <= 0:
                                         continue
                                     depth = state.order_depths.get(symbol, OrderDepth())
                                     if not depth.buy_orders:
@@ -1526,11 +1541,11 @@ class VolcanicRockStrategy(Strategy):
                                     if symbol not in orders:
                                         orders[symbol] = []
                                     if available_sell > 0:
-                                        sell_qty = min(best_bid_amount, 0.5 * available_sell)
-                                        orders[symbol].append(Order(symbol, best_bid, -round(sell_qty)))
+                                        sell_qty = min(best_bid_amount, math.floor(0.3*available_sell))
+                                        orders[symbol].append(Order(symbol, best_bid, -sell_qty))
 
                     # 严格检查所有仓位
-                    if total_position < 20 or self.time_counter == 20:
+                    if total_position <= 40 or self.time_counter == 20:
                         self.current_mode = "Normal"
                         self.active_atm = None
                         self.active_time_value = 0
@@ -1538,14 +1553,15 @@ class VolcanicRockStrategy(Strategy):
                         self.active_direction = 0
 
                     return orders
-
         return orders
+
 
     def save_state(self, state):
         return {}
 
     def load_state(self, state):
         pass
+
 
 
 class Config:
