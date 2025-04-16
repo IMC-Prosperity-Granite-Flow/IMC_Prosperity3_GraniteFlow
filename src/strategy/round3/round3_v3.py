@@ -982,7 +982,9 @@ class VolcanicRockStrategy(Strategy):
         self.timestamp_high = 1000000
         self.timestamp_unit = 100
         self.betas = []
+        self.raw_ivs = []
         self.ivs = []
+        self.base_ivs = deque(maxlen = time_window)
 
     #工具函数
 
@@ -1027,7 +1029,7 @@ class VolcanicRockStrategy(Strategy):
 
     def implied_volatility_call_bisect(self, market_price, S, K, T, 
                                     sigma_low=0.001, sigma_high=0.8, 
-                                    tol=1e-6, max_iter=50):
+                                    tol=1e-8, max_iter = 500):
         def objective(sigma):
             return self.bs_call_price(S, K, T, sigma) - market_price
 
@@ -1100,13 +1102,15 @@ class VolcanicRockStrategy(Strategy):
             if self.betas != []:
                 if (iv == 0.001) or (iv == 0.8):
                     beta_update = False
+            self.raw_ivs.append(iv)
             self.ivs.append(iv)
         
         m = np.log(np.array(self.K)/current_S)/np.sqrt(self.T)
 
+    
         if beta_update:
             self.betas = self.fit_vol_surface(m, self.ivs)
-
+            
 
         striks = np.array(m)
         X = np.column_stack([
@@ -1148,11 +1152,14 @@ class VolcanicRockStrategy(Strategy):
     
     def generate_orders_fair_value_arbitrage(self, state: TradingState) -> Tuple[Dict[str, List[Order]], float]:
         """
-        根据fair_value进行套利
+        根据iv进行套利
         """
         orders = {}
         total_delta_exposure = 0.0  # 用局部变量，不要用 self 记录，避免多次调用累加错
         fair_prices = self.calculate_fair_value()
+
+        base_iv = self.betas[0] #利用截距计算base_iv
+        self.base_ivs.append(base_iv)
 
         for i in range(1, len(self.symbols)):
             order_depth = state.order_depths[self.symbols[i]]
@@ -1170,16 +1177,17 @@ class VolcanicRockStrategy(Strategy):
             T = self.T
             
             sigma = self.ivs[i - 1]
-            #只交易ATM
-            if abs(K-S) > 250:
-                continue
-        
+            raw_iv = self.raw_ivs[i - 1]
+
+            logger.print(f"symbol: {self.symbols[i]}, delta_p: {delta_p}, delta_iv: {sigma - raw_iv}")
+            
             # None check
             if mid_price is None or fair_price is None or S is None or sigma is None:
                 continue
 
             option_delta = self.compute_call_delta(S, K, T, sigma)
-            logger.print(f"{self.symbols[i]}: fair_price={fair_price}")
+
+
             for price, amount in order_depth.buy_orders.items():
                 if price > fair_price + 1 and position - amount > -limit:
                     if self.symbols[i] not in orders:
@@ -1228,6 +1236,8 @@ class VolcanicRockStrategy(Strategy):
                 
 
         return orders
+    
+
     def generate_orders_delta_hedge(self, state: TradingState, total_delta_exposure: float) -> List[Order]:
         orders = []
         symbol = "VOLCANIC_ROCK"
@@ -1300,7 +1310,9 @@ class VolcanicRockStrategy(Strategy):
         for symbol in self.symbols:
             if len(self.history[symbol]["mid_price_history"]) > self.time_window:
                 self.history[symbol]["mid_price_history"] = self.history[symbol]["mid_price_history"][-self.time_window:]
-
+                
+        if len(self.base_ivs) > self.time_window:
+            self.base_ivs.popleft()
 
     def save_state(self, state):
         pass
