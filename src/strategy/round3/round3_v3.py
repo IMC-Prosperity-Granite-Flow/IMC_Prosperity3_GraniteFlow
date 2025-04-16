@@ -1152,7 +1152,7 @@ class VolcanicRockStrategy(Strategy):
     
     def generate_orders_fair_value_arbitrage(self, state: TradingState) -> Tuple[Dict[str, List[Order]], float]:
         """
-        根据iv进行套利
+        根据fair price进行套利
         """
         orders = {}
         total_delta_exposure = 0.0  # 用局部变量，不要用 self 记录，避免多次调用累加错
@@ -1160,6 +1160,15 @@ class VolcanicRockStrategy(Strategy):
 
         base_iv = self.betas[0] #利用截距计算base_iv
         self.base_ivs.append(base_iv)
+        
+        scaled_rock_prices = (-5) * (self.history['VOLCANIC_ROCK']['mid_price_history'] / np.mean(self.history['VOLCANIC_ROCK']['mid_price_history']) - 1)
+        scaled_base_ivs = (self.base_ivs / np.mean(self.base_ivs) - 1)
+        #用scaled_rock_prices 作为base_iv的平均线
+        base_iv_diff = scaled_base_ivs[-1] - scaled_rock_prices[-1]
+        logger.print(f"base_iv_diff: {base_iv_diff}")
+
+        #平移修正iv_fitted
+        self.ivs = [iv - base_iv_diff for iv in self.ivs]
 
         for i in range(1, len(self.symbols)):
             order_depth = state.order_depths[self.symbols[i]]
