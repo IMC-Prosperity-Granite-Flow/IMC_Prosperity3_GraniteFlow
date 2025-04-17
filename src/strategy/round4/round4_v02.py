@@ -1874,6 +1874,7 @@ class MagnificentMacaronsStrategy(Strategy):
         return []
     
     def load_state(self, state):
+        observations = state.observations
         pass
 
     def save_state(self, state):
