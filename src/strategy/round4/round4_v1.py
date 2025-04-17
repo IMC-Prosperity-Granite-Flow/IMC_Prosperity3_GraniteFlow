@@ -1117,32 +1117,33 @@ class BasketStrategy(Strategy):
 
 
 class VolcanicRockStrategy(Strategy):
-    def __init__(self, symbols: List[str], position_limits: dict, time_window: int , iv_threshold: float):
+    def __init__(self, symbols: List[str], position_limits: dict, time_window: int, threshold_config: dict):
         # 使用第一个symbol作为虚拟主产品
         super().__init__(symbols[0], position_limits[symbols[0]])
         self.symbols = symbols
         self.K = [int(symbol.split("_")[-1]) for symbol in symbols[1:]]
         self.position_limits = position_limits
         self.time_window = time_window
-        self.iv_positive_threshold = iv_threshold
-        self.iv_negative_threshold = -iv_threshold
 
+        #默认阈值
+        self.iv_positive_threshold = 0.01
+        self.iv_negative_threshold = -0.01
         self.iv_clear_downrange = -0.01
         self.iv_clear_uprange = 0.01
+        #阈值字典
+        self.threshold_config = threshold_config
 
         self.history = {}
-        self.T = 5/365
+        self.T = 5/365 #为(8-当前轮次天数) / 365 例如day0为8/365
         self.timestamp_high = 1000000
         self.timestamp_unit = 100
         self.betas = []
-        self.raw_ivs = []
-        self.ivs = []
-        self.base_ivs = deque(maxlen = time_window)
-        self.outlier_times = 0
+        self.raw_ivs = [] #市场实际iv
+        self.ivs = [] #拟合iv
+        self.base_ivs = deque(maxlen = time_window) 
         self.regime = 0 #base iv 市场状态判断
 
-        
-
+    
     #工具函数
 
     def calculate_mid_price(self, order_depth):
@@ -1271,7 +1272,7 @@ class VolcanicRockStrategy(Strategy):
         ivs = np.array(self.ivs)
 
         # 过滤异常 iv：只保留合理范围内的点
-        valid_mask = (ivs > 0.01) & (ivs < 0.5)
+        valid_mask = (ivs > 0.14) & (ivs < 0.35)
         m_filtered = m[valid_mask]
         ivs_filtered = ivs[valid_mask]
 
@@ -1287,7 +1288,7 @@ class VolcanicRockStrategy(Strategy):
         iv_fitted = X @ self.betas
 
         # 限制拟合后的 IV 在合理范围
-        iv_fitted = np.clip(iv_fitted, 0.01, 0.5)
+        iv_fitted = np.clip(iv_fitted, 0.0125, 0.35)
 
         # 平移 base_iv 修正
         base_iv = self.betas[0]
@@ -1300,6 +1301,11 @@ class VolcanicRockStrategy(Strategy):
         base_iv_diff = 0
         # 应用 base_iv_diff 修正
         self.ivs = list(iv_fitted - base_iv_diff)
+
+        logger.print(f"self betas: {self.betas}, beta_update: {beta_update}")
+        logger.print(f"self ivs: {self.ivs}")
+        logger.print(f"self raw_ivs: {self.raw_ivs}")
+
 
         # 计算各期权 fair price
         fair_prices = [
@@ -1340,7 +1346,7 @@ class VolcanicRockStrategy(Strategy):
     
     def generate_orders_fair_value_arbitrage(self, state: TradingState) -> Tuple[Dict[str, List[Order]], float]:
         """
-        根据fair price进行套利
+        根据iv进行套利
         """
         orders = {}
         total_delta_exposure = 0.0  # 用局部变量，不要用 self 记录，避免多次调用累加错
@@ -1349,7 +1355,7 @@ class VolcanicRockStrategy(Strategy):
 
         #市场状态判断
         base_iv = self.base_ivs[-1]
-        if base_iv <= 0.174:
+        if base_iv <= 0.17:
             self.regime = 0
         else:
             self.regime = 1
@@ -1386,64 +1392,11 @@ class VolcanicRockStrategy(Strategy):
 
             #根据不同strick price 调整delta iv 阈值
     
-            if K == 9500:
-                if self.regime == 0:
-                    self.iv_positive_threshold = 0.08
-                    self.iv_negative_threshold = -0.01
-
-
-                if self.regime == 1:
-                    self.iv_positive_threshold = 0.125
-                    self.iv_negative_threshold = 0.08
-
-
-
-            if K == 9750:
-                if self.regime == 0:
-                    self.iv_positive_threshold = 0.08
-                    self.iv_negative_threshold = -0.01
-
-
-                if self.regime == 1:
-                    self.iv_positive_threshold = 0.02
-                    self.iv_negative_threshold = -0.04
-
-
-
-            if K == 10000:
-                if self.regime == 0:
-                    self.iv_positive_threshold = 0.01
-                    self.iv_negative_threshold = -0.01
-
-
-                if self.regime == 1:
-                    self.iv_positive_threshold = 0.03
-                    self.iv_negative_threshold = -0.01
-
-
-            
-            if K == 10250:
-                if self.regime == 0:
-                    self.iv_positive_threshold = 0.005
-                    self.iv_negative_threshold = -0.007
-
-
-                if self.regime == 1:
-                    self.iv_positive_threshold = 0.03
-                    self.iv_negative_threshold = 0
-
-
-            
-            if K == 10500:
-                if self.regime == 0:
-                    self.iv_positive_threshold = 0.01
-                    self.iv_negative_threshold = -0.006
-
-
-                if self.regime == 1:
-                    self.iv_positive_threshold = 0.035
-                    self.iv_negative_threshold = -0.005
-
+            if K in self.threshold_config and self.regime in self.threshold_config[K]:
+                self.iv_positive_threshold = self.threshold_config[K][self.regime]['iv_positive_threshold']
+                self.iv_negative_threshold = self.threshold_config[K][self.regime]['iv_negative_threshold']
+                self.iv_clear_uprange = self.threshold_config[K][self.regime]['iv_clear_uprange']
+                self.iv_clear_downrange = self.threshold_config[K][self.regime]['iv_clear_downrange']
 
 
             if delta_iv > self.iv_positive_threshold:
@@ -1468,31 +1421,36 @@ class VolcanicRockStrategy(Strategy):
                         orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount)) #卖出
                         position -= amount
                         total_delta_exposure += option_delta * amount * -1
-        
-            '''
-            elif self.iv_clear_downrange < delta_iv < self.iv_clear_uprange:
-                #市场iv处于平衡区间，清仓
-                if position > 0:
-                    #需要卖出平仓
-                    for price, amount in order_depth.buy_orders.items():
-                        if self.symbols[i] not in orders:
-                            orders[self.symbols[i]] = []
-                        amount = min(amount, position)
-                        orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
-                        position -= amount
-                        total_delta_exposure += option_delta * amount * -1
 
-                if position < 0:
-                    #需要买入平仓
-                    for price, amount in order_depth.sell_orders.items():
-                        if self.symbols[i] not in orders:
-                            orders[self.symbols[i]] = []
-                        amount = -min(-amount, -position)
-                        orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
-                        position += amount
-                        total_delta_exposure += option_delta * (-amount)
+            #清仓调试
+            clear = 0
+            if clear:
+                if self.iv_clear_downrange < delta_iv < self.iv_clear_uprange:
+                    #市场iv处于平衡区间，清仓
+                    if position > 0:
+                        #需要卖出平仓
+                        for price, amount in order_depth.buy_orders.items():
+                            if self.symbols[i] not in orders:
+                                orders[self.symbols[i]] = []
+                            amount = min(amount, position)
+                            orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
+                            position -= amount
+                            total_delta_exposure += option_delta * amount * -1
+                            if position == 0:
+                                break
 
-            '''
+                    if position < 0:
+                        #需要买入平仓
+                        for price, amount in order_depth.sell_orders.items():
+                            if self.symbols[i] not in orders:
+                                orders[self.symbols[i]] = []
+                            amount = -min(-amount, -position)
+                            orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
+                            position += amount
+                            total_delta_exposure += option_delta * (-amount)
+                            if position == 0:
+                                break
+
             if orders_for_symbol:
                 orders[self.symbols[i]] = orders_for_symbol
 
@@ -1633,7 +1591,6 @@ class VolcanicRockStrategy(Strategy):
 
     def load_state(self, state):
         self.T -= self.timestamp_unit/self.timestamp_high/365
-        logger.print("self.T: ", self.T)
         #储存每个产品的mid_price
         rock_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK"])
         voucher_9500_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_9500"])
@@ -1735,7 +1692,80 @@ class Config:
                     "VOLCANIC_ROCK_VOUCHER_10500": 200,
                 },
                 "time_window": 100,
-                "iv_threshold": 0.012
+                
+                "threshold_config": {
+                    9500: {
+                        0: {
+                            'iv_positive_threshold': 0.089,
+                            'iv_negative_threshold': -0.0057,
+                            'iv_clear_uprange': -0.00044,
+                            'iv_clear_downrange': -0.0019
+                        },
+                        1: {
+                            'iv_positive_threshold': 0.137,
+                            'iv_negative_threshold': 0.0002,
+                            'iv_clear_uprange': 0.114,
+                            'iv_clear_downrange': 0.111
+                        }
+                    },
+                    9750: {
+                        0: {
+                            'iv_positive_threshold': 0.112,
+                            'iv_negative_threshold': -0.0057,
+                            'iv_clear_uprange': 0.0055,
+                            'iv_clear_downrange': 0.0021,
+                            
+                        },
+                        1: {
+                            'iv_positive_threshold': 0.012,
+                            'iv_negative_threshold': -0.042,
+                            'iv_clear_uprange': -0.004,
+                            'iv_clear_downrange': -0.0107
+                        }
+                    },
+                    10000: {
+                        0: {
+                            'iv_positive_threshold': 0.0053,
+                            'iv_negative_threshold': -0.012,
+                            'iv_clear_uprange': -0.0006,
+                            'iv_clear_downrange': -0.0029
+                        },
+                        1: {
+                            'iv_positive_threshold': 0.027,
+                            'iv_negative_threshold': -0.005,
+                            'iv_clear_uprange': 0.016,
+                            'iv_clear_downrange': 0.009
+                        }
+                    },
+                    10250: {
+                        0: {
+                            'iv_positive_threshold': 0.0039,
+                            'iv_negative_threshold': -0.0066,
+                            'iv_clear_uprange': -0.0007,
+                            'iv_clear_downrange': -0.0023
+                        },
+                        1: {
+                            'iv_positive_threshold': 0.028,
+                            'iv_negative_threshold': 0.0027,
+                            'iv_clear_uprange': 0.0265,
+                            'iv_clear_downrange': 0.0048
+                        }
+                    },
+                    10500: {
+                        0: {
+                            'iv_positive_threshold': 0.0052,
+                            'iv_negative_threshold': -0.0018,
+                            'iv_clear_uprange': 0.0017,
+                            'iv_clear_downrange': 0.008
+                        },
+                        1: {
+                            'iv_positive_threshold': 0.0268,
+                            'iv_negative_threshold': -0.0044,
+                            'iv_clear_uprange': 0.0121,
+                            'iv_clear_downrange': 0.0083
+                        }
+                    }
+                }
             },
         }
 class Trader:
