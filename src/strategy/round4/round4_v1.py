@@ -530,67 +530,42 @@ class SquidInkStrategy(Strategy):
 
 # PICNIC_BASKET组合策略
 class BasketStrategy(Strategy):
-    def __init__(self, symbols: List[str], position_limits: dict, std_window: int = 20,
-                 delta1_threshold: float = 10, delta2_threshold: float = 10, time_window: int = 100):
+    def __init__(self, symbols: List[str], position_limits: dict,  # 移除了main_symbol参数
+                delta1_threshold_positive: float, delta2_threshold_positive: float, 
+                delta1_threshold_negative: float, delta2_threshold_negative: float, 
+                max_delta1_positive: float, max_delta2_positive: float,
+                max_delta1_negative: float, max_delta2_negative: float, 
+                time_window: int = 100):
         # 使用第一个symbol作为虚拟主产品
         super().__init__(symbols[0], position_limits[symbols[0]])
-
+        
         self.symbols = symbols
         self.position_limits = position_limits
 
-        self.delta1_history = deque(maxlen=time_window)
-        self.delta2_history = deque(maxlen=time_window)
-        self.std_window = std_window
-        self.delta1_threshold = delta1_threshold
-        self.delta2_threshold = delta2_threshold
+        self.delta1_threshold_positive = delta1_threshold_positive
+        self.delta1_threshold_negative = delta1_threshold_negative
+        
+        self.delta2_threshold_positive = delta2_threshold_positive
+        self.delta2_threshold_negative = delta2_threshold_negative
+        
+        self.max_delta1_positive = max_delta1_positive
+        self.max_delta1_negative = max_delta1_negative
+
+        self.max_delta2_positive = max_delta2_positive
+        self.max_delta2_negative = max_delta2_negative
+
         self.time_window = time_window
-        self.std_multiplier = 1.4
-
-        # 记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
+        
+        #记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
         self.position_history = {symbol: [] for symbol in self.symbols}
-        # 记录fair_value历史
+        #记录fair_value历史
+        
         self.fair_value_history = {symbol: [] for symbol in self.symbols}
-        self.basket_composition = {
-            'PICNIC_BASKET1': {'CROISSANTS': 6, 'JAMS': 3, 'DJEMBES': 1},
-            'PICNIC_BASKET2': {'CROISSANTS': 4, 'JAMS': 2}
-        }
-        # 存储价差历史，而不是价格历史
-        self.price_diff_history = {
-            'PICNIC_BASKET1': deque(maxlen=20),
-            'PICNIC_BASKET2': deque(maxlen=20)
-        }
 
-        # 篮子价格和理论价值历史，用于计算相关性
-        self.basket_price_history = {
-            'PICNIC_BASKET1': deque(maxlen=30),
-            'PICNIC_BASKET2': deque(maxlen=30)
-        }
-        self.basket_value_history = {
-            'PICNIC_BASKET1': deque(maxlen=30),
-            'PICNIC_BASKET2': deque(maxlen=30)
-        }
-
-        # EWMA相关性历史和权重
-        self.ewma_alpha = 0.2  # EWMA衰减系数，值越大表示越重视近期数据
-        self.ewma_correlation = {
-            'PICNIC_BASKET1': 0.8,  # 初始默认相关性
-            'PICNIC_BASKET2': 0.8
-        }
-
-        # 相关性最低门槛，低于此值时不开新仓
-        self.min_correlation_threshold = 0.65
-
-        # 组件价格缓存
-        self.component_prices = {}
-
-        # 最小标准差阈值，防止初期过度交易
-        self.min_std_threshold = 10.0
-
-    # ——————工具函数——————
+    #——————工具函数——————
 
     def calculate_fair_value(self, order_depth):
         """使用买卖加权的price计算fair_value"""
-
         def weighted_avg(prices_vols, n=3):
             total_volume = 0
             price_sum = 0
@@ -612,6 +587,31 @@ class BasketStrategy(Strategy):
 
         # 返回中间价
         return (buy_avg + sell_avg) / 2
+    
+    def get_available_amount(self, symbol: str, state: TradingState) -> int:
+        """
+        返回市场上已有市价单的总数量
+        sell_amount, buy_amount（注意都为正数）
+        """
+        order_depth = state.order_depths[symbol]
+        sell_amount = -sum(order_depth.sell_orders.values())
+        buy_amount = sum(order_depth.buy_orders.values())
+        return sell_amount, buy_amount
+    
+    def get_market_liquidity_limit(self, symbol: str, delta: np.ndarray, state: TradingState) -> np.ndarray:
+        """
+        对 delta 添加市场流动性约束，返回一个布尔 mask。
+        正的 delta 表示买入，负的 delta 表示卖出。
+        """
+        sell_amount, buy_amount = self.get_available_amount(symbol, state)
+
+        # delta 为正（买入），不能超过 buy_amount
+        buy_mask = (delta <= buy_amount)
+        # delta 为负（卖出），不能超过 sell_amount
+        sell_mask = (-delta <= sell_amount)
+
+        return buy_mask & sell_mask
+    
 
     def quick_trade(self, symbol: str, state: TradingState, amount: int) -> Tuple[list, int]:
         """
@@ -633,386 +633,301 @@ class BasketStrategy(Strategy):
                 if amount == 0:
                     break
 
-        elif amount < 0:
+        elif amount < 0 :
             for price, buy_amount in sorted(order_depth.buy_orders.items()):
-                max_amount = min(buy_amount, position + self.position_limits[symbol], -amount)  # amount已经是负数，卖出
+                max_amount = min(buy_amount, position + self.position_limits[symbol], -amount) #amount已经是负数，卖出
                 if max_amount > 0:
-                    # 卖出
+                    #卖出
                     orders.append(Order(symbol, price, -max_amount))
                     position -= max_amount
                     amount += max_amount
 
                 if amount == 0:
                     break
-
+        
         return orders, amount
 
-    def get_price_delta(self, state: TradingState, basket: str) -> float:
+    def get_price_delta_basket1(self, state: TradingState) -> float:
         """
-        计算篮子和其组分的价差：delta = basket_price - components_value
-
-        Args:
-            state: 当前交易状态
-            basket: 篮子名称，如'PICNIC_BASKET1'或'PICNIC_BASKET2'
-
-        Returns:
-            价差delta，如果缺少必要数据则返回0
+        返回PICNIC_BASKET1和其组分的价差：
+        delta = basket1 - composition
         """
-        # 获取篮子组成
-        if basket not in self.basket_composition:
-            return 0.0
+        basket1_order_depths = state.order_depths['PICNIC_BASKET1']
+        croissants_order_depths = state.order_depths['CROISSANTS']
+        jams_order_depths = state.order_depths['JAMS']
+        djembes_order_depths = state.order_depths['DJEMBES']
 
-        components = self.basket_composition[basket]
+        basket1_fair_value = self.calculate_fair_value(basket1_order_depths)
+        croissants_fair_value = self.calculate_fair_value(croissants_order_depths)
+        jams_fair_value = self.calculate_fair_value(jams_order_depths)
+        djembes_fair_value = self.calculate_fair_value(djembes_order_depths)
 
-        # 检查所有所需产品是否在order_depths中
-        required_products = [basket] + list(components.keys())
-        for product in required_products:
-            if product not in state.order_depths:
-                return 0.0  # 如果缺少任何必要产品，返回0
-
-        # 计算篮子自身价格
-        basket_fair_value = self.calculate_fair_value(state.order_depths[basket])
-
-        # 计算组件总价值
-        components_value = 0
-        for component, qty in components.items():
-            component_fair_value = self.calculate_fair_value(state.order_depths[component])
-            if component_fair_value == 0:
-                return 0.0  # 如果组件价格为0，返回0
-            components_value += qty * component_fair_value
-
-        # 加上固定价值
-        if basket == 'PICNIC_BASKET1':
-            components_value += 30
-        elif basket == 'PICNIC_BASKET2':
-            components_value += 103
-
-        # 返回价差
-        return basket_fair_value - components_value
-
-    def calculate_basket_value(self, state: TradingState, basket: str) -> float:
-        """计算篮子理论价值 - 组件价格总和"""
-        if basket not in self.basket_composition:
-            return 0.0
-
-        components = self.basket_composition[basket]
-
-        # 直接从当前市场价格计算
-        basket_value = 0
-        for component, qty in components.items():
-            if component in state.order_depths:
-                component_price = self.calculate_fair_value(state.order_depths[component])
-                if component_price > 0:
-                    basket_value += qty * component_price
-                else:
-                    # 如果组件价格无效，尝试使用缓存的价格
-                    basket_value += qty * self.component_prices.get(component, 0)
-            else:
-                # 使用缓存价格
-                basket_value += qty * self.component_prices.get(component, 0)
-
-        # 添加额外的固定价值
-        if basket == 'PICNIC_BASKET1':
-            basket_value += 30
-        elif basket == 'PICNIC_BASKET2':
-            basket_value += 103
-
-        return basket_value
-
-    # ———————下单模块——————
-
-    # basket统一订单生成函数
-    def generate_basket_orders(self, state: TradingState) -> List[Order]:
-        """生成订单逻辑 - 实现基础篮子套利策略"""
-        orders = []
-
-        # 1. 更新组件价格
-        for component in ['CROISSANTS', 'JAMS', 'DJEMBES']:
-            if component in state.order_depths:
-                component_price = self.calculate_fair_value(state.order_depths[component])
-                if component_price > 0:
-                    self.component_prices[component] = component_price
-                else:
-                    logger.print(f"Failed to get valid price for {component}")
-
-        # 2. 获取篮子价格和计算理论价值
-        basket_prices = {}
-        basket_values = {}
-        price_diffs = {}
-
-        for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
-            # 计算篮子理论价值
-            basket_value = self.calculate_basket_value(state, basket)
-            basket_values[basket] = basket_value
-            basket_price = self.calculate_fair_value(state.order_depths[basket])
-            basket_prices[basket] = basket_price
-
-            # 记录价格和理论价值历史
-            self.basket_price_history[basket].append(basket_price)
-            self.basket_value_history[basket].append(basket_value)
-
-            # 计算价差并记录
-            price_diff = basket_price - basket_value
-            price_diffs[basket] = price_diff
-            self.price_diff_history[basket].append(price_diff)
-
-            # 计算EWMA相关性
-            ewma_corr = self.calculate_ewma_correlation(basket)
-
-        current_diff = price_diffs[basket]
-        # 添加长度检查，避免IndexError
-        entry_diff = self.price_diff_history[basket][-2] if len(self.price_diff_history[basket]) >= 2 else current_diff
-        stop_loss_threshold = entry_diff * 1.2  # 例如，价差翻倍则止损
-
-        if (current_diff < 0 and current_diff < stop_loss_threshold) or (
-                current_diff > 0 and current_diff > stop_loss_threshold):
-            # 平仓逻辑：反向操作当前仓位
-            position = state.position.get(basket, 0)
-            if position != 0:
-                target_amount = -position
-                orders.extend(self.quick_trade(basket, state, target_amount)[0])
-                return orders  # 优先处理止损
-
-        # 3. 确定交易方向和数量
-        for basket in ['PICNIC_BASKET1', 'PICNIC_BASKET2']:
-            if basket in price_diffs:
-                current_position = state.position.get(basket, 0)
-                position_limit = self.position_limits[basket]
-
-                # 获取当前EWMA相关性
-                ewma_corr = self.ewma_correlation.get(basket, 0.8)
-
-                # 计算可用交易额度
-                available_buy = max(0, position_limit - current_position)
-                available_sell = max(0, position_limit + current_position)
-
-                # 根据相关性调整交易量
-                volume_factor = min(1.0, max(0.3, ewma_corr))  # 将相关性映射到0.3-1.0范围的交易量因子
-                max_buy_volume = int(available_buy * volume_factor)
-                max_sell_volume = int(available_sell * volume_factor)
-
-                buy_signal = False
-                sell_signal = False
-                remaining_buy = max_buy_volume
-                remaining_sell = max_sell_volume
-
-                # 计算交易信号 - 使用篮子特定的标准差阈值
-                if basket == 'PICNIC_BASKET1':
-                    buy_signal = price_diffs[basket] < -35  # 篮子低估，买入信号
-                    sell_signal = price_diffs[basket] > 35  # 篮子高估，卖出信号
-
-                if basket == 'PICNIC_BASKET2':
-                    buy_signal = price_diffs[basket] < -40  # 篮子低估，买入信号
-                    sell_signal = price_diffs[basket] > -2  # 篮子高估，卖出信号
-
-                # 相关性过滤器: 相关性低于阈值时不开新仓
-                if ewma_corr < self.min_correlation_threshold and current_position == 0:
-                    continue
-
-                # 执行买入
-                if buy_signal and max_buy_volume > 0 and basket in state.order_depths:
-                    # 找出最佳卖价
-                    sell_orders = sorted(state.order_depths[basket].sell_orders.items())
-                    basket_orders = []
-
-                    for price, volume in sell_orders:
-                        # 卖单的volume是负数
-                        buyable = min(remaining_buy, -volume)
-                        if buyable > 0:
-                            basket_orders.append(Order(basket, price, buyable))
-                            remaining_buy -= buyable
-                            if remaining_buy <= 0:
-                                break
-
-                    orders.extend(basket_orders)
-
-                # 执行卖出
-                elif sell_signal and max_sell_volume > 0 and basket in state.order_depths:
-                    # 找出最佳买价
-                    buy_orders = sorted(state.order_depths[basket].buy_orders.items(), reverse=True)
-                    basket_orders = []
-
-                    # 遍历所有买单，从最高价开始吃单
-                    for price, volume in buy_orders:
-                        # 买单的volume是正数
-                        sellable = min(remaining_sell, volume)
-                        if sellable > 0:
-                            basket_orders.append(Order(basket, price, -sellable))
-                            remaining_sell -= sellable
-                            if remaining_sell <= 0:
-                                break
-
-                    orders.extend(basket_orders)
-
-        return orders
-
-    def generate_orders_basket1(self, symbol: str, state: TradingState) -> List[Order]:
-        basket_orders = self.generate_basket_orders(state)
-        orders = [basket_order for basket_order in basket_orders if basket_order.symbol == 'PICNIC_BASKET1']
-        return orders
-
-    def generate_orders_basket2(self, symbol: str, state: TradingState) -> List[Order]:
-        basket_orders = self.generate_basket_orders(state)
-        orders = [basket_order for basket_order in basket_orders if basket_order.symbol != 'PICNIC_BASKET1']
-        return orders
-
-    def _get_max_possible_trade(self, symbol: str, state: TradingState, direction: int) -> int:
-        """计算最大可交易量（考虑仓位限制和订单簿深度）"""
-        position = state.position.get(symbol, 0)
-        available = self.position_limits[symbol] - abs(position)
-        return min(available, 15) * direction  # 示例：每次最多交易5单位（可根据需要调整）
-
-    def _apply_correlation_filter(self, basket: str) -> Tuple[bool, float, float]:
+        delta = basket1_fair_value - 6 * croissants_fair_value - 3 * jams_fair_value - 1 * djembes_fair_value
+        return delta
+        
+    def get_price_delta_basket2(self, state: TradingState) -> float:
         """
-        根据相关性决定是否交易及如何调整交易参数
-        返回：(是否交易, 数量调整系数, 调整后阈值系数)
+        返回PICNIC_BASKET2和其组分的价差：
+        delta = basket1 - composition
         """
-        ewma_corr = self.ewma_correlation.get(basket, 0.8)
+        basket2_order_depths = state.order_depths['PICNIC_BASKET2']
+        croissants_order_depths = state.order_depths['CROISSANTS']
+        jams_order_depths = state.order_depths['JAMS']
 
-        # 相关性过低时不交易
-        if ewma_corr < self.min_correlation_threshold:
-            return False, 0, 0
+        basket2_fair_value = self.calculate_fair_value(basket2_order_depths)
+        croissants_fair_value = self.calculate_fair_value(croissants_order_depths)
+        jams_fair_value = self.calculate_fair_value(jams_order_depths)
 
-        # 计算交易量调整系数 (0.3-1.0)
-        volume_factor = min(1.0, max(0.3, ewma_corr))
+        delta = basket2_fair_value - 4 * croissants_fair_value - 2 * jams_fair_value
 
-        # 计算阈值调整系数
-        if ewma_corr > 0.9:
-            threshold_factor = 0.6  # 相关性高，降低阈值更积极交易
-        elif ewma_corr < 0.85:
-            threshold_factor = 1.2  # 相关性低，提高阈值更保守交易
+        return delta
+        
+
+    #线性规划得出最佳basket1, basket2下单数
+    def compute_feasible_arbitrage(
+        self, state,
+        spread1: float,
+        spread2: float,
+        unhedged: dict,
+    ) -> Tuple[int, int]:
+        """
+        输入state, 价差spread1, 价差spread2和对冲单。定义为price_basket - price_set
+        返回最佳basket1, basket2下单数
+        正数表示买入，负数表示卖出
+        """
+        search_range1 = self.position_limits['PICNIC_BASKET1']
+        search_range2 = self.position_limits['PICNIC_BASKET2']
+
+        x1_vals = np.arange(-search_range1, search_range1 + 1)
+        x2_vals = np.arange(-search_range2, search_range2 + 1)
+        x1_grid, x2_grid = np.meshgrid(x1_vals, x2_vals, indexing='ij')
+
+        # 计算 delta
+        delta_CROISSANTS = -6 * x1_grid - 4 * x2_grid
+        delta_JAMS = -3 * x1_grid - 2 * x2_grid
+        delta_DJEMBES = -1 * x1_grid
+        delta_BASKET1 = x1_grid
+        delta_BASKET2 = x2_grid
+
+        # 当前仓位
+        get_pos = lambda p: state.position.get(p, 0)
+        limit = self.position_limits
+
+        # 检查合法性，返回布尔矩阵
+        def is_valid(delta, pos, lim):
+            max_buy = lim - pos
+            max_sell = pos + lim
+            return (delta <= max_buy) & (delta >= -max_sell)
+
+        mask = (
+            is_valid(delta_CROISSANTS, get_pos("CROISSANTS"), limit["CROISSANTS"]) &
+            is_valid(delta_JAMS, get_pos("JAMS"), limit["JAMS"]) &
+            is_valid(delta_DJEMBES, get_pos("DJEMBES"), limit["DJEMBES"]) &
+            is_valid(delta_BASKET1, get_pos("PICNIC_BASKET1"), limit["PICNIC_BASKET1"]) &
+            is_valid(delta_BASKET2, get_pos("PICNIC_BASKET2"), limit["PICNIC_BASKET2"])
+        )
+
+        mask &= self.get_market_liquidity_limit("CROISSANTS", delta_CROISSANTS, state)
+        mask &= self.get_market_liquidity_limit("JAMS", delta_JAMS, state)
+        mask &= self.get_market_liquidity_limit("DJEMBES", delta_DJEMBES, state)
+        mask &= self.get_market_liquidity_limit("PICNIC_BASKET1", delta_BASKET1, state)
+        mask &= self.get_market_liquidity_limit("PICNIC_BASKET2", delta_BASKET2, state)
+
+        # 排除价差过小的情况
+
+        if spread1 == 0:
+            mask &= (x1_grid == 0)
+        if spread2 == 0:
+            mask &= (x2_grid == 0)
+        # 计算 score
+
+        score = -spread1 * x1_grid - spread2 * x2_grid
+        score_masked = np.where(mask, score, -np.inf)
+
+        # 找到最大值的位置
+        idx = np.unravel_index(np.argmax(score_masked), score_masked.shape)
+        best_x1 = x1_grid[idx]
+        best_x2 = x2_grid[idx]
+
+        return int(best_x1), int(best_x2)
+
+
+    def check_current_position_hedged(self, state) -> dict[str, int]:
+        """
+        检查当前的持仓是否完全对冲。
+        如果不对冲，返回 {symbol: delta_needed} 表示需要调整的商品及数量。
+        """
+        # 当前仓位
+        pos = lambda s: state.position.get(s, 0)
+        c = pos("CROISSANTS")
+        j = pos("JAMS")
+        d = pos("DJEMBE")
+        b1 = pos("PICNIC_BASKET1")
+        b2 = pos("PICNIC_BASKET2")
+
+        # 理想情况下的线性组合（反向推 basket set 应该造成的持仓）
+        expected_c = -6 * b1 - 4 * b2
+        expected_j = -3 * b1 - 2 * b2
+        expected_d = -1 * b1
+
+        unhedged = {}
+
+        if c != expected_c:
+            unhedged["CROISSANTS"] = expected_c - c
+        if j != expected_j:
+            unhedged["JAMS"] = expected_j - j
+        if d != expected_d:
+            unhedged["DJEMBE"] = expected_d - d
+
+        return unhedged
+    
+
+    def scale_pairing_amount(
+        self,
+        pairing_amt: int,
+        delta: float,
+        threshold_pos: float,
+        threshold_neg: float,
+        max_range_pos: float,
+        max_range_neg: float,
+        weight_pos: float = 1.0,
+        weight_neg: float = 1.0,
+    ) -> int:
+        if delta == 0:
+            return 0
+
+        if delta > 0:
+            if delta < threshold_pos:
+                return 0
+            distance = delta - threshold_pos
+            scale = min((distance / (max_range_pos - threshold_pos))**2, 1.0)
+            scaled_amt = int(round(pairing_amt * scale * weight_pos))
         else:
-            threshold_factor = 1.0  # 保持默认阈值
+            if delta > threshold_neg:
+                return 0
+            distance = abs(delta - threshold_neg)
+            scale = min((distance / (abs(max_range_neg - threshold_neg)))**1.5, 1.0)
+            scaled_amt = int(round(pairing_amt * scale * weight_neg))
 
-        return True, volume_factor, threshold_factor
+        return scaled_amt
+    
 
-    def generate_orders_croissant(self, symbol: str, state: TradingState) -> List[Order]:
+    #———————下单模块——————
+
+    def generate_orders_basket1(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int, unhedged: dict) -> List[Order]:
         orders = []
-        # 处理Basket1的信号
-        if len(self.delta1_history) >= self.std_window:
-            # 确保delta1_history不为空
-            delta1 = self.delta1_history[-1] if self.delta1_history else 0
-            std_dev1 = np.std(self.delta1_history)
-
-            # 应用相关性过滤器
-            should_trade, volume_factor, threshold_factor = self._apply_correlation_filter('PICNIC_BASKET1')
-
-            if should_trade and abs(delta1) > self.std_multiplier * threshold_factor * std_dev1:
-                # 根据篮子1的系数计算交易量（6:1），并应用相关性调整
-                basket_trade_direction = 1 if delta1 > 0 else -1  # 篮子方向与组件相反
-                base_amount = 6 * basket_trade_direction * self._get_max_possible_trade('PICNIC_BASKET1', state,
-                                                                                        basket_trade_direction)
-                component_amount = -int(base_amount * volume_factor)  # 应用量调整系数
-
-                if component_amount != 0:
-                    orders.extend(self.quick_trade(symbol, state, component_amount)[0])
-
-        # 处理Basket2的信号（类似逻辑）
-        if len(self.delta2_history) >= self.std_window:
-            # 确保delta2_history不为空
-            delta2 = self.delta2_history[-1] if self.delta2_history else 0
-            std_dev2 = np.std(self.delta2_history)
-
-            # 应用相关性过滤器
-            should_trade, volume_factor, threshold_factor = self._apply_correlation_filter('PICNIC_BASKET2')
-
-            if should_trade and abs(delta2) > self.std_multiplier * threshold_factor * std_dev2:
-                basket_trade_direction = 1 if delta2 > 0 else -1
-                base_amount = 4 * basket_trade_direction * self._get_max_possible_trade('PICNIC_BASKET2', state,
-                                                                                        basket_trade_direction)
-                component_amount = -int(base_amount * volume_factor)  # 应用量调整系数
-
-                if component_amount != 0:
-                    orders.extend(self.quick_trade(symbol, state, component_amount)[0])
-
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, pairing_amount1)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
         return orders
 
-    def generate_orders_jams(self, symbol: str, state: TradingState) -> List[Order]:
+    def generate_orders_basket2(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int, unhedged: dict) -> List[Order]:
         orders = []
-        # Basket1相关
-        if len(self.delta1_history) >= self.std_window:
-            # 确保delta1_history不为空
-            delta1 = self.delta1_history[-1] if self.delta1_history else 0
-            std_dev1 = np.std(self.delta1_history)
-
-            # 应用相关性过滤器
-            should_trade, volume_factor, threshold_factor = self._apply_correlation_filter('PICNIC_BASKET1')
-
-            if should_trade and abs(delta1) > self.std_multiplier * threshold_factor * std_dev1:
-                basket_trade_direction = 1 if delta1 > 0 else -1
-                base_amount = 3 * basket_trade_direction * self._get_max_possible_trade('PICNIC_BASKET1', state,
-                                                                                        basket_trade_direction)
-                component_amount = -int(base_amount * volume_factor)  # 应用量调整系数
-
-                if component_amount != 0:
-                    orders.extend(self.quick_trade(symbol, state, component_amount)[0])
-
-        # Basket2相关
-        if len(self.delta2_history) >= self.std_window:
-            # 确保delta2_history不为空
-            delta2 = self.delta2_history[-1] if self.delta2_history else 0
-            std_dev2 = np.std(self.delta2_history)
-
-            # 应用相关性过滤器
-            should_trade, volume_factor, threshold_factor = self._apply_correlation_filter('PICNIC_BASKET2')
-
-            if should_trade and abs(delta2) > self.std_multiplier * threshold_factor * std_dev2:
-                basket_trade_direction = 1 if delta2 > 0 else -1
-                base_amount = 2 * basket_trade_direction * self._get_max_possible_trade('PICNIC_BASKET2', state,
-                                                                                        basket_trade_direction)
-                component_amount = -int(base_amount * volume_factor)  # 应用量调整系数
-
-                if component_amount != 0:
-                    orders.extend(self.quick_trade(symbol, state, component_amount)[0])
-
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, pairing_amount2)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
         return orders
 
-    def generate_orders_djembes(self, symbol: str, state: TradingState) -> List[Order]:
+    
+    def generate_orders_croissant(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int, unhedged: dict) -> List[Order]:
         orders = []
-
-        if len(self.delta1_history) >= self.std_window:
-            # 确保delta1_history不为空
-            delta1 = self.delta1_history[-1] if self.delta1_history else 0
-            std_dev1 = np.std(self.delta1_history)
-
-            # 应用相关性过滤器
-            should_trade, volume_factor, threshold_factor = self._apply_correlation_filter('PICNIC_BASKET1')
-
-            if should_trade and abs(delta1) > self.std_multiplier * threshold_factor * std_dev1:
-                basket_trade_direction = 1 if delta1 > 0 else -1
-                base_amount = 1 * basket_trade_direction * self._get_max_possible_trade('PICNIC_BASKET1', state,
-                                                                                        basket_trade_direction)
-                component_amount = -int(base_amount * volume_factor)  # 应用量调整系数
-
-                if component_amount != 0:
-                    orders.extend(self.quick_trade(symbol, state, component_amount)[0])
-
+        #下对冲单
+        if "CROISSANTS" in unhedged:
+            # 调整仓位
+            adjust_amount = unhedged["CROISSANTS"]
+            adjust_orders, rest_amount = self.quick_trade(symbol, state, adjust_amount)
+            orders += adjust_orders
+        
+        #下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, - 6 * pairing_amount1 - 4 * pairing_amount2)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
         return orders
-
+        
+    def generate_orders_jams(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int, unhedged: dict) -> List[Order]:
+        orders = []
+        #下对冲单
+        if "JAMS" in unhedged:
+            # 调整仓位
+            adjust_amount = unhedged["JAMS"]
+            adjust_orders, rest_amount = self.quick_trade(symbol, state, adjust_amount)
+            orders += adjust_orders
+        
+        #下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, - 3 * pairing_amount1 - 2 * pairing_amount2)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
+        return orders
+        
+    def generate_orders_djembes(self, symbol: str, state: TradingState, pairing_amount1: int, pairing_amount2: int, unhedged: dict) -> List[Order]:
+        orders = []
+        #下对冲单
+        if "DJEMBES" in unhedged:
+            # 调整仓位
+            adjust_amount = unhedged["DJEMBES"]
+            adjust_orders, rest_amount = self.quick_trade(symbol, state, adjust_amount)
+            orders += adjust_orders
+        
+        #先下套利单
+        pairing_orders, rest_amount = self.quick_trade(symbol, state, - 1 * pairing_amount1)
+        orders += pairing_orders
+        if rest_amount > 0:
+            #再下剩余单
+            pass
+        return orders
+            
     def generate_orders(self, state: TradingState) -> Dict[Symbol, List[Order]]:
-        # 计算并记录当前delta
-        delta1 = self.get_price_delta(state, 'PICNIC_BASKET1')
-        delta2 = self.get_price_delta(state, 'PICNIC_BASKET2')
-
-        # 只有当计算结果有效（非零）时才记录
-        if delta1 != 0:
-            self.delta1_history.append(delta1)
-        if delta2 != 0:
-            self.delta2_history.append(delta2)
-
-        # 生成订单（移除所有原有套利逻辑参数）
         orders = {}
         strategy_map = {
             'PICNIC_BASKET1': self.generate_orders_basket1,
             'PICNIC_BASKET2': self.generate_orders_basket2,
             'CROISSANTS': self.generate_orders_croissant,
-            'JAMS': self.generate_orders_jams,
+            'JAMS': self.generate_orders_jams, 
             'DJEMBES': self.generate_orders_djembes,
-        }
+        }   
 
+
+        #检查是否完全对冲
+        unhedged = self.check_current_position_hedged(state)
+
+        #获取两个品种的价差，计算仓位分配比例
+        delta1 = self.get_price_delta_basket1(state)
+        delta2 = self.get_price_delta_basket2(state)
+        logger.print(f"Current delta, delta1: {delta1}, delta2: {delta2}")
+
+        #价差过滤条件
+        if self.delta1_threshold_negative < delta1 < self.delta1_threshold_positive:
+            delta1 = 0
+        
+        if self.delta2_threshold_negative < delta2 < self.delta2_threshold_positive:
+            delta2 = 0
+
+        
+        # 计算仓位分配比例
+        logger.print(f"Filtered delta, delta1: {delta1}, delta2: {delta2}")
+        pairing_amount1, pairing_amount2 = self.compute_feasible_arbitrage(state, delta1, delta2, unhedged)
+        logger.print(f"Pairing amount1: {pairing_amount1}, 2: {pairing_amount2}")
+        pairing_amount1 = self.scale_pairing_amount(pairing_amount1, delta1, self.delta1_threshold_positive, self.delta1_threshold_negative, self.max_delta1_positive, self.max_delta1_negative)
+        pairing_amount2 = self.scale_pairing_amount(pairing_amount2, delta2, self.delta2_threshold_positive, self.delta2_threshold_negative, self.max_delta2_positive, self.max_delta2_negative)
+
+
+
+        # 遍历处理所有相关产品
         for symbol in self.symbols:
             if symbol in state.order_depths:
-                orders[symbol] = strategy_map[symbol](symbol, state)
+                # 生成该symbol的订单...
+                handler = strategy_map.get(symbol)
+                orders[symbol] = handler(symbol, state, pairing_amount1, pairing_amount2, unhedged)
 
         return orders
 
@@ -1020,7 +935,7 @@ class BasketStrategy(Strategy):
         orders = self.generate_orders(state)
         strategy_state = self.save_state(state)
         return orders, strategy_state
-
+        
     def save_history(self, symbol: str, state: TradingState):
         """
         保存该产品的历史数据
@@ -1032,89 +947,24 @@ class BasketStrategy(Strategy):
         self.position_history[symbol].append(position)
         self.fair_value_history[symbol].append(fair_value)
 
-        if len(self.fair_value_history[symbol]) > self.std_window:
-            self.fair_value_history[symbol] = self.fair_value_history[symbol][-self.std_window:]
+        if len(self.position_history[symbol]) > self.time_window:
+            self.position_history[symbol] = self.position_history[symbol][-self.time_window:]
+
+        if len(self.fair_value_history[symbol]) > self.time_window:
+            self.fair_value_history[symbol] = self.fair_value_history[symbol][-self.time_window:]
 
         return
-
+    
     def save_state(self, state):
-        # 对每个产品维护历史数据
+        #对每个产品维护历史数据          
         for symbol in self.symbols:
             if symbol in state.order_depths:
                 self.save_history(symbol, state)
-
-        return {
-            'price_diff_history': {
-                basket: list(history) for basket, history in self.price_diff_history.items()
-            },
-            'basket_price_history': {
-                basket: list(history) for basket, history in self.basket_price_history.items()
-            },
-            'basket_value_history': {
-                basket: list(history) for basket, history in self.basket_value_history.items()
-            },
-            'ewma_correlation': self.ewma_correlation,
-            'component_prices': self.component_prices
-        }
-
+                        
+        return super().save_state(state)
+        
     def load_state(self, state):
-        if hasattr(state, 'traderData') and state.traderData:
-            try:
-                trader_data = json.loads(state.traderData)
-                basket_data = trader_data.get(self.symbol, {})
-
-                # 加载价差历史
-                if 'price_diff_history' in basket_data:
-                    for basket, history in basket_data['price_diff_history'].items():
-                        self.price_diff_history[basket] = deque(history, maxlen=20)
-
-                # 加载价格和价值历史
-                if 'basket_price_history' in basket_data:
-                    for basket, history in basket_data['basket_price_history'].items():
-                        self.basket_price_history[basket] = deque(history, maxlen=30)
-
-                if 'basket_value_history' in basket_data:
-                    for basket, history in basket_data['basket_value_history'].items():
-                        self.basket_value_history[basket] = deque(history, maxlen=30)
-
-                # 加载EWMA相关性
-                if 'ewma_correlation' in basket_data:
-                    self.ewma_correlation = basket_data['ewma_correlation']
-
-                # 加载组件价格
-                if 'component_prices' in basket_data:
-                    self.component_prices = basket_data['component_prices']
-            except Exception as e:
-                logger.print(f"Error loading state: {str(e)}")
-
-    def calculate_ewma_correlation(self, basket: str) -> float:
-        """计算篮子价格与理论价值之间的EWMA相关性"""
-        # 需要至少5个数据点才能计算有意义的相关性
-        if len(self.basket_price_history[basket]) < 5 or len(self.basket_value_history[basket]) < 5:
-            return self.ewma_correlation[basket]  # 返回当前值
-
-        prices = np.array(list(self.basket_price_history[basket]))
-        values = np.array(list(self.basket_value_history[basket]))
-
-        # 计算价格和价值的变化率，避免绝对价格可能导致的虚假相关性
-        price_changes = np.diff(prices) / prices[:-1]
-        value_changes = np.diff(values) / values[:-1]
-
-        # 确保有足够的变化率数据
-        if len(price_changes) < 4 or len(value_changes) < 4:
-            return self.ewma_correlation[basket]
-
-        # 计算当前批次的相关系数
-        current_corr = np.corrcoef(price_changes, value_changes)[0, 1]
-        if np.isnan(current_corr):
-            return self.ewma_correlation[basket]
-
-        # 应用EWMA更新
-        new_corr = self.ewma_alpha * current_corr + (1 - self.ewma_alpha) * self.ewma_correlation[basket]
-        self.ewma_correlation[basket] = new_corr
-
-        return new_corr
-
+        return super().load_state(state)
 
 class VolcanicRockStrategy(Strategy):
     def __init__(self, symbols: List[str], position_limits: dict, time_window: int, threshold_config: dict):
@@ -1290,21 +1140,12 @@ class VolcanicRockStrategy(Strategy):
         # 限制拟合后的 IV 在合理范围
         iv_fitted = np.clip(iv_fitted, 0.0125, 0.35)
 
-        # 平移 base_iv 修正
+        # base_iv
         base_iv = self.betas[0]
         self.base_ivs.append(base_iv)
 
-        scaled_rock_prices = (-5) * (self.history['VOLCANIC_ROCK']['mid_price_history'] / np.mean(self.history['VOLCANIC_ROCK']['mid_price_history']) - 1)
-        scaled_base_ivs = (self.base_ivs / np.mean(self.base_ivs) - 1)
 
-        base_iv_diff = scaled_base_ivs[-1] - scaled_rock_prices[-1]
-        base_iv_diff = 0
-        # 应用 base_iv_diff 修正
-        self.ivs = list(iv_fitted - base_iv_diff)
-
-        logger.print(f"self betas: {self.betas}, beta_update: {beta_update}")
-        logger.print(f"self ivs: {self.ivs}")
-        logger.print(f"self raw_ivs: {self.raw_ivs}")
+        self.ivs = list(iv_fitted)
 
 
         # 计算各期权 fair price
@@ -1570,17 +1411,18 @@ class VolcanicRockStrategy(Strategy):
     def generate_orders(self, state: TradingState) -> Dict[str, List[Order]]:
         orders = {}
         #先检查当前仓位的hedge情况
-        #current_delta = self.calculate_current_portfolio_delta(state)
+        current_delta = self.calculate_current_portfolio_delta(state)
 
         arbitrage_orders, total_delta_exposure = self.generate_orders_fair_value_arbitrage(state)
 
         #arbitrage_orders, total_delta_exposure = self.generate_orders_pair_arbitrage(state, exist_orders=arbitrage_orders)
 
-        #hedge_orders = self.generate_orders_delta_hedge(state, total_delta_exposure)
+        hedge_orders = self.generate_orders_delta_hedge(state, total_delta_exposure + current_delta)
 
         rock_orders = self.generate_rock_orders(state)
 
         orders.update(arbitrage_orders)
+        orders['VOLCANIC_ROCK'] = hedge_orders
         if rock_orders:
             if "VOLCANIC_ROCK" in rock_orders:
                 orders["VOLCANIC_ROCK"] = rock_orders['VOLCANIC_ROCK']
@@ -1675,9 +1517,14 @@ class Config:
                     "JAMS": 350,
                     "DJEMBES": 60
                 },
-                "std_window": 20,
-                "delta1_threshold": 10,
-                "delta2_threshold": 10,
+                "delta1_threshold_positive": 110,
+                "delta1_threshold_negative": -110,
+                "delta2_threshold_positive": 100,
+                "delta2_threshold_negative": -80,
+                "max_delta1_positive": 200,
+                "max_delta1_negative": -200,
+                "max_delta2_positive": 150,
+                "max_delta2_negative": -120,
                 "time_window": 100
             },
             "VOLCANIC_ROCK_GROUP":{
