@@ -7,7 +7,6 @@ import jsonpickle
 import math
 from collections import deque
 
-
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
@@ -1866,6 +1865,20 @@ class VolcanicRockStrategy(Strategy):
     def save_state(self, state):
         pass
 
+class MagnificentMacaronsStrategy(Strategy):
+    def __init__(self, symbol, position_limit):
+        super().__init__(symbol, position_limit)
+    
+    def generate_orders(self, state: TradingState) -> Dict[str, List[Order]]:
+        orders = []
+        return []
+    
+    def load_state(self, state):
+        pass
+
+    def save_state(self, state):
+        pass
+
 
 
 
@@ -1918,9 +1931,8 @@ class Config:
                 },
                 "time_window": 100,
                 "iv_threshold": 0.012
-            }
+            },
         }
-
 class Trader:
     def __init__(self, product_config=None):
         # 使用默认 config，或外部传入 config

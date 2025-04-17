@@ -36,9 +36,10 @@ class PackageResourcesReader(FileReader):
     def file(self, path_parts: list[str]) -> ContextManager[Optional[Path]]:
         try:
             container = resources.files(f"prosperity3bt.resources.{'.'.join(path_parts[:-1])}")
-            if not (container / path_parts[-1]).is_file():
+            file = container / path_parts[-1]
+            if not file.is_file():
                 return wrap_in_context_manager(None)
 
-            return resources.as_file(container / path_parts[-1])
+            return resources.as_file(file)
         except Exception:
             return wrap_in_context_manager(None)

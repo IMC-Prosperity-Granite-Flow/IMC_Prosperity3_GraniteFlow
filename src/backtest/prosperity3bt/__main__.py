@@ -43,7 +43,7 @@ def parse_days(file_reader: FileReader, days: list[str]) -> list[tuple[int, int]
             round_num = int(arg)
 
             parsed_days_in_round = []
-            for day_num in range(-5, 6):
+            for day_num in range(-5, 100):
                 if has_day_data(file_reader, round_num, day_num):
                     parsed_days_in_round.append((round_num, day_num))
 

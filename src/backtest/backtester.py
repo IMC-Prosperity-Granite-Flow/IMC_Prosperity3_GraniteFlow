@@ -1,8 +1,9 @@
 from prosperity3bt.runner import run_backtest
 from prosperity3bt.file_reader import PackageResourcesReader
+from prosperity3bt.file_reader import FileSystemReader
 from prosperity3bt.models import TradeMatchingMode
 from collections import defaultdict
-from src.strategy.round1.round1_v2 import Trader
+from pathlib import Path
 
 
 
@@ -10,7 +11,7 @@ from src.strategy.round1.round1_v2 import Trader
 # 运行回测
 class Backtester:
        def __init__(self, trader):
-              self.trader = trader
+              self.trader = trader()
               pass
        
 
@@ -43,7 +44,7 @@ class Backtester:
 
               return product_pnl
        
-       def backtest(self, round_num: int, day_num: int = None) -> tuple[float, dict[str, float]]:
+       def backtest(self, round_num: int, day_num: int = None, data_path: str = None) -> tuple[float, dict[str, float]]:
               """
               运行回测
               :param round_num: 回测轮次
@@ -51,11 +52,13 @@ class Backtester:
               :return: 总 PnL: float, 产品 PnL: dict[str, float]
               """
               if day_num is None:
-                     day_nums = [-2, -1, 0]
+                     day_nums = [round_num - 2, round_num - 1, round_num]
               else:
                      day_nums = [day_num]
-
-              file_reader = PackageResourcesReader()
+              if not data_path:
+                     file_reader = PackageResourcesReader()
+              else:
+                     file_reader = FileSystemReader(Path(data_path))
               final_pnl = 0.0
               product_pnl_list = []
 

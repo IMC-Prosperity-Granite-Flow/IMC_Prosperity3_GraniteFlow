@@ -8,6 +8,18 @@ LIMITS = {
     "RAINFOREST_RESIN": 50,
     "KELP": 50,
     "SQUID_INK": 50,
+    "CROISSANTS": 250,
+    "JAMS": 350,
+    "DJEMBES": 60,
+    "PICNIC_BASKET1": 60,
+    "PICNIC_BASKET2": 100,
+    "VOLCANIC_ROCK": 400,
+    "VOLCANIC_ROCK_VOUCHER_9500": 200,
+    "VOLCANIC_ROCK_VOUCHER_9750": 200,
+    "VOLCANIC_ROCK_VOUCHER_10000": 200,
+    "VOLCANIC_ROCK_VOUCHER_10250": 200,
+    "VOLCANIC_ROCK_VOUCHER_10500": 200,
+    "MAGNIFICENT_MACARONS": 75,
 }
 
 
@@ -104,8 +116,7 @@ def read_day_data(file_reader: FileReader, round_num: int, day_num: int, no_name
     for suffix in trades_suffixes:
         with file_reader.file([f"round{round_num}", f"trades_round_{round_num}_day_{day_num}_{suffix}.csv"]) as file:
             if file is None:
-                trades_data_type = "Anonymized" if suffix == "nn" else "De-anonymized"
-                raise ValueError(f"{trades_data_type} trades data is not available for round {round_num} day {day_num}")
+                continue
 
             for line in file.read_text(encoding="utf-8").splitlines()[1:]:
                 columns = line.split(";")
