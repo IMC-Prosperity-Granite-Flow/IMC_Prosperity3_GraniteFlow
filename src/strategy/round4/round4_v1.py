@@ -1126,6 +1126,10 @@ class VolcanicRockStrategy(Strategy):
         self.time_window = time_window
         self.iv_positive_threshold = iv_threshold
         self.iv_negative_threshold = -iv_threshold
+
+        self.iv_clear_downrange = -0.01
+        self.iv_clear_uprange = 0.01
+
         self.history = {}
         self.T = 5/365
         self.timestamp_high = 1000000
@@ -1135,6 +1139,7 @@ class VolcanicRockStrategy(Strategy):
         self.ivs = []
         self.base_ivs = deque(maxlen = time_window)
         self.outlier_times = 0
+        self.regime = 0 #base iv 市场状态判断
 
         
 
@@ -1226,21 +1231,6 @@ class VolcanicRockStrategy(Strategy):
         ])
         beta = np.linalg.lstsq(X_full, iv, rcond=None)[0]
 
-        # 如果开口向下，就 fallback 到无 β₁ 项的拟合
-        if beta[2] < 0:
-            # fallback: 只用 β₀ + β₂·m² 拟合，强制 β₂ ≥ 0
-            X_restrict = np.column_stack([
-                np.ones_like(m),
-                m**2
-            ])
-            beta_restrict = np.linalg.lstsq(X_restrict, iv, rcond=None)[0]
-            beta_0, beta_2 = beta_restrict
-
-            # 强制 β₂ ≥ 0
-            beta_2 = max(beta_2, 1e-6)
-
-            beta = [beta_0, 0.0, beta_2]
-
         return list(beta)
 
     def compute_call_delta(self, S, K, T, sigma):
@@ -1269,7 +1259,7 @@ class VolcanicRockStrategy(Strategy):
             iv = self.implied_volatility_call_bisect(voucher_price, current_S, K, self.T)
             
             # 检查是否是边界异常值，决定是否更新 β
-            if self.betas != [] and (iv == 0.001 or iv == 0.8):
+            if self.betas != [] and (iv == 0.001 or iv == 0.8) and (self.betas[2] < 0):
                 beta_update = False
 
             self.raw_ivs.append(iv)
@@ -1357,6 +1347,12 @@ class VolcanicRockStrategy(Strategy):
 
         fair_prices = self.calculate_fair_value()
 
+        #市场状态判断
+        base_iv = self.base_ivs[-1]
+        if base_iv <= 0.174:
+            self.regime = 0
+        else:
+            self.regime = 1
 
         for i in range(1, len(self.symbols)):
             order_depth = state.order_depths[self.symbols[i]]
@@ -1389,27 +1385,67 @@ class VolcanicRockStrategy(Strategy):
             delta_iv = sigma - raw_iv
 
             #根据不同strick price 调整delta iv 阈值
-            '''
+    
             if K == 9500:
-                self.iv_positive_threshold = 0.006
-                self.iv_negative_threshold = -0.01
+                if self.regime == 0:
+                    self.iv_positive_threshold = 0.08
+                    self.iv_negative_threshold = -0.01
+
+
+                if self.regime == 1:
+                    self.iv_positive_threshold = 0.125
+                    self.iv_negative_threshold = 0.08
+
+
 
             if K == 9750:
-                self.iv_positive_threshold = 0.025
-                self.iv_negative_threshold = -0.015
+                if self.regime == 0:
+                    self.iv_positive_threshold = 0.08
+                    self.iv_negative_threshold = -0.01
+
+
+                if self.regime == 1:
+                    self.iv_positive_threshold = 0.02
+                    self.iv_negative_threshold = -0.04
+
+
 
             if K == 10000:
-                self.iv_positive_threshold = 0.008
-                self.iv_negative_threshold = -0.018
+                if self.regime == 0:
+                    self.iv_positive_threshold = 0.01
+                    self.iv_negative_threshold = -0.01
+
+
+                if self.regime == 1:
+                    self.iv_positive_threshold = 0.03
+                    self.iv_negative_threshold = -0.01
+
+
             
             if K == 10250:
-                self.iv_positive_threshold = 0.01
-                self.iv_negative_threshold = -0.01
+                if self.regime == 0:
+                    self.iv_positive_threshold = 0.005
+                    self.iv_negative_threshold = -0.007
+
+
+                if self.regime == 1:
+                    self.iv_positive_threshold = 0.03
+                    self.iv_negative_threshold = 0
+
+
             
             if K == 10500:
-                self.iv_positive_threshold = 0.005
-                self.iv_negative_threshold = -0.006
-            '''
+                if self.regime == 0:
+                    self.iv_positive_threshold = 0.01
+                    self.iv_negative_threshold = -0.006
+
+
+                if self.regime == 1:
+                    self.iv_positive_threshold = 0.035
+                    self.iv_negative_threshold = -0.005
+
+
+
             if delta_iv > self.iv_positive_threshold:
                 #市场iv偏低，买入
                 for price, amount in order_depth.sell_orders.items():
@@ -1421,7 +1457,7 @@ class VolcanicRockStrategy(Strategy):
                         position += amount
                         total_delta_exposure += option_delta * (-amount)
 
-            if delta_iv < self.iv_negative_threshold:
+            elif delta_iv < self.iv_negative_threshold:
                 #市场iv偏高，卖出
                 for price, amount in order_depth.buy_orders.items(): 
                         if self.symbols[i] not in orders:
@@ -1432,7 +1468,31 @@ class VolcanicRockStrategy(Strategy):
                         orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount)) #卖出
                         position -= amount
                         total_delta_exposure += option_delta * amount * -1
+        
+            '''
+            elif self.iv_clear_downrange < delta_iv < self.iv_clear_uprange:
+                #市场iv处于平衡区间，清仓
+                if position > 0:
+                    #需要卖出平仓
+                    for price, amount in order_depth.buy_orders.items():
+                        if self.symbols[i] not in orders:
+                            orders[self.symbols[i]] = []
+                        amount = min(amount, position)
+                        orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
+                        position -= amount
+                        total_delta_exposure += option_delta * amount * -1
 
+                if position < 0:
+                    #需要买入平仓
+                    for price, amount in order_depth.sell_orders.items():
+                        if self.symbols[i] not in orders:
+                            orders[self.symbols[i]] = []
+                        amount = -min(-amount, -position)
+                        orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount))
+                        position += amount
+                        total_delta_exposure += option_delta * (-amount)
+
+            '''
             if orders_for_symbol:
                 orders[self.symbols[i]] = orders_for_symbol
 
