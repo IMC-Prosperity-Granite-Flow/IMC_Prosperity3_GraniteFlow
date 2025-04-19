@@ -1582,10 +1582,8 @@ class MacaronStrategy(Strategy):
         
         own_trades = state.own_trades.get(self.symbol, [])
         for trade in own_trades:
-            logger.print(f"Processing trade: {trade}")
             trade_id = (trade.seller, trade.buyer, trade.price, trade.quantity, trade.timestamp)
             if trade_id in self.processed_trades:
-                logger.print('trade exist, skip!')
                 continue
             self.processed_trades.add(trade_id)
             
@@ -1673,8 +1671,7 @@ class MacaronStrategy(Strategy):
         return 0
 
     def should_convert(self, state: TradingState, conversion_type: str) -> bool:
-        """判断是否应该进行conversion交易"""
-        # 确保没有超过conversion限制
+        """基于 avg_cost 判断是否可以通过 conversion 跨岛套利"""
         if self.conversion_count >= self.conversion_limit:
             return False
 
@@ -1682,36 +1679,25 @@ class MacaronStrategy(Strategy):
             return False
 
         obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
-
-        # 获取订单深度数据
-        order_depth = state.order_depths.get(self.symbol, OrderDepth())
-
-        # 如果没有订单深度数据
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return False
-
-        market_fair_value = self.calculate_fair_value(order_depth)
-
-        if market_fair_value == 0:
-            return False
-
         position = state.position.get(self.symbol, 0)
 
-        # 计算买入和卖出的总成本
+        avg_cost, net_pos = self.calculate_avg_cost(state)
+
+        # conversion 买入的成本
         buy_cost = obs.askPrice + obs.transportFees + obs.importTariff
+        # conversion 卖出的收益
         sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
 
-        # 获取最佳买卖价格
-        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
+        min_profit = 0.1 # 利润门槛
 
         if conversion_type == "BUY" and position < self.position_limit:
-            # 从Pristine Cuisine买入是否有利可图
-            return buy_cost < best_ask - 4
+            # 假设当前是空头，可以通过 conversion 买入来平空，或者反手做多
+            # 判断当前持仓成本是否远高于跨岛买入
+            return avg_cost > buy_cost + min_profit
 
         elif conversion_type == "SELL" and position > -self.position_limit:
-            # 卖给Pristine Cuisine是否有利可图
-            return sell_revenue > best_bid + 4
+            # 假设当前是多头，可以通过 conversion 卖出
+            return sell_revenue - avg_cost > min_profit
 
         return False
 
@@ -1731,36 +1717,32 @@ class MacaronStrategy(Strategy):
             self.fair_value_history.append(fair_value)
 
     def determine_optimal_conversions(self, state: TradingState) -> int:
-        """确定最优的转换数量"""
+        """基于 avg_cost 判断并决定 conversion 数量"""
         if not state.observations or "MAGNIFICENT_MACARONS" not in state.observations.conversionObservations:
             return 0
 
         position = state.position.get(self.symbol, 0)
         obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
-        market_fair_value = self.calculate_fair_value(state.order_depths.get(self.symbol, OrderDepth()))
+        avg_cost, net_pos = self.calculate_avg_cost(state)
 
         conversions = 0
+        min_profit = 0.1  # 可以调大点防止手续费侵蚀
 
-        # 评估买入情况
+        buy_cost = obs.askPrice + obs.transportFees + obs.importTariff
+        sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
+
+        # 如果当前是空头或无仓位，可以从岛外买入（conversion）补仓/反手
         if self.should_convert(state, "BUY"):
-            # 计算最大可买入量
-            buy_cost = obs.askPrice + obs.transportFees + obs.importTariff
-            total_storage_cost = self.update_storage_cost(state)
-            profit_per_unit = market_fair_value - buy_cost - (total_storage_cost / position)
-
-            if profit_per_unit > 0:
-                max_buy = min(self.conversion_limit - self.conversion_count,
-                              self.position_limit - position)
+            profit = avg_cost - buy_cost
+            if profit > min_profit:
+                max_buy = min(self.conversion_limit - self.conversion_count, self.position_limit - position)
                 conversions = max_buy
 
-        # 评估卖出情况
+        # 如果当前是多头，可以把仓位卖给岛外
         elif self.should_convert(state, "SELL"):
-            # 计算最大可卖出量
-            sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
-            profit_per_unit = sell_revenue - market_fair_value
-
-            if profit_per_unit > 0:
-                max_sell = min(self.conversion_limit - self.conversion_count, position)
+            profit = sell_revenue - avg_cost
+            if profit > min_profit:
+                max_sell = min(self.conversion_limit - self.conversion_count, net_pos)
                 conversions = -max_sell
 
         return conversions
@@ -1865,6 +1847,7 @@ class MacaronStrategy(Strategy):
 
         # 确定最优的转换数量
         conversions = self.determine_optimal_conversions(state)
+        logger.print(f"Converting {conversions}")
         if conversions != 0:
             self.conversion_count += abs(conversions)
 
