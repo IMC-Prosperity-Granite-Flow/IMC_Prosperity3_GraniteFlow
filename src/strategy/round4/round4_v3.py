@@ -680,7 +680,6 @@ class BasketStrategy(Strategy):
 
         if (current_diff < 0 and current_diff < stop_loss_threshold) or (
                 current_diff > 0 and current_diff > stop_loss_threshold):
-            logger.print(f"------------------{basket} current_diff {current_diff:.2f}---entry_diff--- {entry_diff:.2f}")
             # 平仓逻辑：反向操作当前仓位
             position = state.position.get(basket, 0)
             if position != 0:
@@ -1538,6 +1537,7 @@ class MacaronStrategy(Strategy):
         super().__init__(symbol, position_limit)
         self.conversion_limit = conversion_limit
         self.storage_cost = 0.1
+        self.current_mode = "Normal"
 
         self.sun_threshold = sun_threshold
         self.sun_coeff = sun_coeff
@@ -1546,10 +1546,16 @@ class MacaronStrategy(Strategy):
 
         # 历史数据
         self.fair_value_history = deque(maxlen=100)
+        self.sugar_price_history = deque(maxlen=100)
+        self.sun_price_history = deque(maxlen=100)
+
         self.observation_history = deque(maxlen=100)
         self.position_history = deque(maxlen=100)
         self.conversion_count = 0
         self.position_entries = {}
+
+        self.sunlightIndex_slope = 0
+        self.sunlightIndex_history = deque(maxlen = 100)
         
         #计算持仓成本数据
         self.orders_history = {
@@ -1557,6 +1563,49 @@ class MacaronStrategy(Strategy):
             'short': []
         }
 
+    def get_available_amount(self, symbol: str, state: TradingState) -> int:
+        """
+        返回市场上已有市价单的总数量
+        sell_amount, buy_amount（注意都为正数）
+        """
+        order_depth = state.order_depths[symbol]
+        sell_amount = -sum(order_depth.sell_orders.values())
+        buy_amount = sum(order_depth.buy_orders.values())
+        return sell_amount, buy_amount
+    
+    def quick_trade(self, symbol: str, state: TradingState, amount: int) -> Tuple[list, int]:
+        """
+        快速交易函数：
+        给定商品名和所需数量(amount)，正数代表买入，负数代表卖出
+        返回尽可能的最佳orders和剩余数量
+        """
+        orders = []
+        order_depth = state.order_depths[symbol]
+        position = state.position.get(symbol, 0)
+
+        if amount > 0:
+            for price, sell_amount in sorted(order_depth.sell_orders.items()):
+                max_amount = min(-sell_amount, self.position_limit - position, amount)
+                if max_amount > 0:
+                    orders.append(Order(symbol, price, max_amount))
+                    position += max_amount
+                    amount -= max_amount
+                if amount == 0:
+                    break
+
+        elif amount < 0:
+            for price, buy_amount in sorted(order_depth.buy_orders.items()):
+                max_amount = min(buy_amount, position + self.position_limit, -amount)  # amount已经是负数，卖出
+                if max_amount > 0:
+                    # 卖出
+                    orders.append(Order(symbol, price, -max_amount))
+                    position -= max_amount
+                    amount += max_amount
+
+                if amount == 0:
+                    break
+
+        return orders, amount
     
     def calculate_avg_cost(self, state: TradingState):
         """
@@ -1705,16 +1754,36 @@ class MacaronStrategy(Strategy):
         """处理市场数据并更新策略状态"""
         position = state.position.get(self.symbol, 0)
         self.position_history.append(position)
-
-        # 记录行情观察值
-        if state.observations and "MAGNIFICENT_MACARONS" in state.observations.conversionObservations:
-            self.observation_history.append(state.observations.conversionObservations["MAGNIFICENT_MACARONS"])
-
+        
         # 计算并记录当前公允价值
         order_depth = state.order_depths.get(self.symbol, OrderDepth())
         fair_value = self.calculate_fair_value(order_depth)
         if fair_value > 0:
             self.fair_value_history.append(fair_value)
+        # 记录行情观察值
+        if state.observations and "MAGNIFICENT_MACARONS" in state.observations.conversionObservations:
+            self.observation_history.append(state.observations.conversionObservations["MAGNIFICENT_MACARONS"])
+        else: #如果没有数据，直接跳过
+            return
+        #记录糖价
+
+        self.sugar_price_history.append(state.observations.conversionObservations["MAGNIFICENT_MACARONS"].sugarPrice)
+        
+        if state.observations.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex is not None:
+            sunlightIndex = state.observations.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
+            self.sunlightIndex_history.append(sunlightIndex)
+        else:
+            sunlightIndex = None
+        if sunlightIndex is not None:
+            #根据SI或者相关系数设置突破条件
+            if sunlightIndex < 45 and self.current_mode == 'Normal' and self.sunlightIndex_slope < 0:
+                self.current_mode = "CSI"
+
+        if len(self.sunlightIndex_history) > 5:
+            self.sunlightIndex_slope = (self.sunlightIndex_history[-1] - self.sunlightIndex_history[-5]) / 5
+        else:
+            self.sunlightIndex_slope = 0
+
 
     def determine_optimal_conversions(self, state: TradingState) -> int:
         """基于 avg_cost 判断并决定 conversion 数量"""
@@ -1734,7 +1803,7 @@ class MacaronStrategy(Strategy):
         # 如果当前是空头或无仓位，可以从岛外买入（conversion）补仓/反手
         if self.should_convert(state, "BUY"):
             profit = avg_cost - buy_cost
-            if profit > min_profit:
+            if profit > min_profit :
                 max_buy = min(self.conversion_limit - self.conversion_count, self.position_limit - position)
                 conversions = max_buy
 
@@ -1751,100 +1820,126 @@ class MacaronStrategy(Strategy):
         """生成订单和转换请求"""
         self.process_market_data(state)
         avg_cost, net_pos = self.calculate_avg_cost(state)
-        logger.print(f"Net position: {net_pos}, Avg cost: {avg_cost}")
         orders = []
         conversions = 0
         order_depth = state.order_depths.get(self.symbol, OrderDepth())
         position = state.position.get(self.symbol, 0)
-
+        
         # 如果没有订单深度数据
         if not order_depth.buy_orders and not order_depth.sell_orders:
             return orders
 
-        # 获取最佳买卖价格
-        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
+        logger.print(f"Current mode: {self.current_mode}")
+        #普通模式
+        if self.current_mode == "Normal":
+            # 获取最佳买卖价格
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
 
-        # 计算市场公允价值
-        fair_value = self.calculate_fair_value(order_depth)
+            # 计算市场公允价值
+            fair_value = self.calculate_fair_value(order_depth)
 
-        # 仓位调整系数 - 仓位越大，卖出意愿越强
-        position_factor = 0.25 * position / self.position_limit
-        adjusted_fair_value = fair_value - position_factor
+            # 仓位调整系数 - 仓位越大，卖出意愿越强
+            position_factor = 5 * position / self.position_limit
+            adjusted_fair_value = fair_value - position_factor
 
-        # --- Pricing factors | 价格影响因素 ------------------------------
-        sunlight_bonus = 0.0
-        sugar_penalty = 0.0
+            '''
+            # --- Pricing factors | 价格影响因素 ------------------------------
+            sunlight_bonus = 0.0
+            sugar_penalty = 0.0
 
-        if (state.observations
-                and "MAGNIFICENT_MACARONS" in state.observations.conversionObservations):
-            obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
+            if (state.observations
+                    and "MAGNIFICENT_MACARONS" in state.observations.conversionObservations):
+                obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
 
-            # Sunlight makes macarons more valuable | 阳光越足，马卡龙越值钱
-            sunlight_bonus = max(0,
-                                 obs.sunlightIndex - self.sun_threshold) * self.sun_coeff
+                # Sunlight makes macarons more valuable | 阳光越足，马卡龙越值钱
+                sunlight_bonus = max(0,
+                                    obs.sunlightIndex - self.sun_threshold) * self.sun_coeff
 
-            # High sugar price raises cost | 糖价越高，成本越高
-            sugar_penalty = max(0,
-                                obs.sugarPrice - self.sugar_threshold) * self.sugar_coeff
+                # High sugar price raises cost | 糖价越高，成本越高
+                sugar_penalty = max(0,
+                                    obs.sugarPrice - self.sugar_threshold) * self.sugar_coeff
 
-        adjusted_fair_value = adjusted_fair_value + sunlight_bonus - sugar_penalty
+            adjusted_fair_value = adjusted_fair_value + sunlight_bonus - sugar_penalty
+            logger.print(f"delta fair value: {sunlight_bonus - sugar_penalty}")
+            '''
 
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        # 设置买卖价格
-        buy_price = best_bid + 1
-        sell_price = best_ask - 1
+            best_bid = max(order_depth.buy_orders.keys())
+            best_ask = min(order_depth.sell_orders.keys())
+            # 设置买卖价格
+            buy_price = best_bid + 1
+            sell_price = best_ask - 1
 
-        # 确定买入量
-        available_buy = max(0, self.position_limit - position)
-        if available_buy > 0:
-            # 吃单逻辑：如果有比我们买价更便宜的卖单，直接吃入
-            for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-                if ask_price < adjusted_fair_value:
-                    buy_volume = min(-ask_volume, available_buy)
-                    if buy_volume > 0:
-                        orders.append(Order(self.symbol, ask_price, buy_volume))
-                        available_buy -= buy_volume
+            # 确定买入量
+            available_buy = max(0, self.position_limit - position)
+            buy_penalty_factor = 0.5
+            if available_buy > 0:
+                # 吃单逻辑：如果有比我们买价更便宜的卖单，直接吃入
+                for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
+                    if ask_price < adjusted_fair_value - 0.5 * (-ask_volume):
+                        buy_volume = min(-ask_volume, available_buy)
+                        if buy_volume > 0:
+                            orders.append(Order(self.symbol, ask_price, buy_volume))
+                            available_buy -= buy_volume
 
-                        if available_buy <= 0:
-                            break
-                else:
-                    break
+                            if available_buy <= 0:
+                                break
+                    else:
+                        break
 
-            # 挂单逻辑：在当前最高买价上方挂买单
-            if available_buy > 0 and buy_price < best_ask:
-                buy_amount = min(available_buy, position)
-                orders.append(Order(self.symbol, buy_price, buy_amount))
+                # 挂单逻辑：在当前最高买价上方挂买单
+                if available_buy > 0 and buy_price < best_ask - 0.5 * (available_buy):
+                    orders.append(Order(self.symbol, buy_price, available_buy))
 
-        # 确定卖出量
-        available_sell = max(0, position + self.position_limit)
-        if available_sell > 0:
-            # 吃单逻辑：如果有比我们卖价更高的买单，直接卖出
-            for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                if bid_price > adjusted_fair_value:
-                    sell_volume = min(bid_volume, available_sell)
-                    if sell_volume > 0:
-                        orders.append(Order(self.symbol, bid_price, -sell_volume))
-                        available_sell -= sell_volume
+            # 确定卖出量
+            available_sell = max(0, position + self.position_limit)
+            if available_sell > 0:
+                # 吃单逻辑：如果有比我们卖价更高的买单，直接卖出
+                for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                    if bid_price > adjusted_fair_value:
+                        sell_volume = min(bid_volume, available_sell)
+                        if sell_volume > 0:
+                            orders.append(Order(self.symbol, bid_price, -sell_volume))
+                            available_sell -= sell_volume
 
-                        if available_sell <= 0:
-                            break
-                else:
-                    break
+                            if available_sell <= 0:
+                                break
+                    else:
+                        break
 
-            # 挂单逻辑：在当前最低卖价下方挂卖单
-            if available_sell > 0 and position > 0 and sell_price > best_bid:
-                sell_amount = min(available_sell, position)
-                orders.append(Order(self.symbol, sell_price, -sell_amount))
+                # 挂单逻辑：在当前最低卖价下方挂卖单
+                if available_sell > 0 and position > 0 and sell_price > best_bid:
+                    orders.append(Order(self.symbol, sell_price, -available_sell))
+
+        #做多
+        if self.current_mode == "CSI":
+            if self.sunlightIndex_slope > 0 and self.sunlightIndex_history[-1] > 30: #退出条件
+                self.current_mode = "Closing position"
+            #做多
+            max_buy_amount, _ = self.get_available_amount(self.symbol, state)
+            max_buy_amount = min(max_buy_amount, self.position_limit - position)
+            quick_orders, _ = self.quick_trade(self.symbol, state, max_buy_amount)
+            orders.extend(quick_orders)
+
+
+        #做空
+        if self.current_mode == "Closing position":
+            if position <= -70 and self.sunlightIndex_history[-1] > 40:
+                self.current_mode = "Normal"
+            else:
+                _, max_sell_amount = self.get_available_amount(self.symbol, state)
+                max_sell_amount = min(max_sell_amount, position + self.position_limit)
+                quick_orders, _ = self.quick_trade(self.symbol, state, -max_sell_amount)
+                orders.extend(quick_orders)
 
         return orders
+
 
     def run(self, state: TradingState) -> Tuple[List[Order], dict, int]:
         """执行策略主逻辑，同时返回订单、状态和转换请求"""
         # 生成普通订单
         orders = self.generate_orders(state)
-
+        
         # 确定最优的转换数量
         conversions = self.determine_optimal_conversions(state)
         logger.print(f"Converting {conversions}")
