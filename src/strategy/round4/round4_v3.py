@@ -1550,6 +1550,84 @@ class MacaronStrategy(Strategy):
         self.position_history = deque(maxlen=100)
         self.conversion_count = 0
         self.position_entries = {}
+        
+        #计算持仓成本数据
+        self.orders_history = {
+            'long': [], 
+            'short': []
+        }
+
+    
+    def calculate_avg_cost(self, state: TradingState):
+        """
+        实时从 own_trades 中读取成交信息，计算平均持仓成本与当前净持仓
+        自动处理多空平仓冲销逻辑
+        """
+        if not hasattr(self, "processed_trades"):
+            self.processed_trades = set()
+            self.orders_history = {
+                'long': [],
+                'short': []
+            }
+        def offset_inventory(order_list, amount):
+            while amount > 0 and order_list:
+                price, qty = order_list[0]
+                if qty <= amount:
+                    amount -= qty
+                    order_list.pop(0)
+                else:
+                    order_list[0] = (price, qty - amount)
+                    amount = 0
+            return amount
+        
+        own_trades = state.own_trades.get(self.symbol, [])
+        for trade in own_trades:
+            logger.print(f"Processing trade: {trade}")
+            trade_id = (trade.seller, trade.buyer, trade.price, trade.quantity, trade.timestamp)
+            if trade_id in self.processed_trades:
+                logger.print('trade exist, skip!')
+                continue
+            self.processed_trades.add(trade_id)
+            
+
+            # 判断你是买还是卖
+            if trade.buyer == "SUBMISSION":
+                direction = 1
+            elif trade.seller == "SUBMISSION":
+                direction = -1
+            else:
+                continue  # 不属于你自己的成交，跳过
+
+            price = trade.price
+            qty = trade.quantity
+
+            # 平仓处理逻辑（offset 对手方向）
+            if direction == 1:
+                # 如果有空头仓位，优先冲销
+                qty = offset_inventory(self.orders_history['short'], qty)
+                if qty > 0:
+                    self.orders_history['long'].append((price, qty))
+            else:
+                # 有多头仓位时优先冲销
+                qty = offset_inventory(self.orders_history['long'], qty)
+                if qty > 0:
+                    self.orders_history['short'].append((price, qty))
+
+        # 计算净仓与平均成本
+        long_qty = sum(q for _, q in self.orders_history['long'])
+        short_qty = sum(q for _, q in self.orders_history['short'])
+        net_pos = long_qty - short_qty
+
+        if net_pos > 0:
+            total_cost = sum(price * qty for price, qty in self.orders_history['long'])
+            avg_cost = total_cost / long_qty if long_qty else 0.0
+        elif net_pos < 0:
+            total_cost = sum(price * qty for price, qty in self.orders_history['short'])
+            avg_cost = total_cost / short_qty if short_qty else 0.0
+        else:
+            avg_cost = 0.0
+
+        return avg_cost, net_pos
 
     def update_storage_cost(self, state: TradingState):
         current_time = state.timestamp
@@ -1690,7 +1768,8 @@ class MacaronStrategy(Strategy):
     def generate_orders(self, state: TradingState) -> List[Order]:
         """生成订单和转换请求"""
         self.process_market_data(state)
-
+        avg_cost, net_pos = self.calculate_avg_cost(state)
+        logger.print(f"Net position: {net_pos}, Avg cost: {avg_cost}")
         orders = []
         conversions = 0
         order_depth = state.order_depths.get(self.symbol, OrderDepth())
