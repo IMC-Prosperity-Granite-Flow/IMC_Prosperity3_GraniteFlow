@@ -179,7 +179,18 @@ class BasketStrategy(Strategy):
         self.delta2_mean = delta2_mean
         self.delta2_std = delta2_std
 
+        #记录当前最高delta绝对值
+        self.zscore1_max = 2
+        self.zscore2_max = 2
+        self.zscore1_step = 0.1
+        self.zscore2_step = 0.1
+
         self.time_window = time_window
+
+        self.pairing_amount1 = 0 #记录baseket1的配对数量（正数为买入basket数量，负数为卖出basket数量）
+        self.pairing_amount2 = 0 #记录baseket2的配对数量
+
+        self.rest_orders_amount = {symbol: 0 for symbol in self.symbols} #记录各个产品待下单的数量
         
         #记录所有产品的仓位历史，长度为100，利用self.position_history[symbol]取出对应仓位
         self.position_history = {symbol: [] for symbol in self.symbols}
@@ -235,40 +246,6 @@ class BasketStrategy(Strategy):
         sell_mask = (-delta <= sell_amount)
 
         return buy_mask & sell_mask
-    
-    def quick_trade(self, symbol: str, state: TradingState, amount: int) -> Tuple[list, int]:
-        """
-        快速交易函数：
-        给定商品名和所需数量(amount)，正数代表买入，负数代表卖出
-        返回尽可能的最佳orders和剩余数量
-        """
-        orders = []
-        order_depth = state.order_depths[symbol]
-        position = state.position.get(symbol, 0)
-
-        if amount > 0:
-            for price, sell_amount in sorted(order_depth.sell_orders.items()):
-                max_amount = min(-sell_amount, self.position_limits[symbol] - position, amount)
-                if max_amount > 0:
-                    orders.append(Order(symbol, price, max_amount))
-                    position += max_amount
-                    amount -= max_amount
-                if amount == 0:
-                    break
-
-        elif amount < 0 :
-            for price, buy_amount in sorted(order_depth.buy_orders.items()):
-                max_amount = min(buy_amount, position + self.position_limits[symbol], -amount) #amount已经是负数，卖出
-                if max_amount > 0:
-                    #卖出
-                    orders.append(Order(symbol, price, -max_amount))
-                    position -= max_amount
-                    amount += max_amount
-
-                if amount == 0:
-                    break
-        
-        return orders, amount
 
     def get_price_delta_basket1(self, state: TradingState) -> float:
         """
@@ -307,11 +284,139 @@ class BasketStrategy(Strategy):
 
 
     #———————下单模块——————
-    def marketing_order(self, symbol: str, state: TradingState) -> List[Order]:
+    def marketing_order(self, symbol: str, state: TradingState, position: int) -> List[Order]:
         """
         做市订单
         """
         orders = []
+        order_depth = state.order_depths[symbol]
+        position = position if position else state.position.get(symbol, 0)
+        sorted_bids = sorted(order_depth.buy_orders.keys(), reverse=True)
+        sorted_asks = sorted(order_depth.sell_orders.keys())
+        best_bid = sorted_bids[0] if sorted_bids else None
+        best_ask = sorted_asks[0] if sorted_asks else None
+
+        #做市
+        spread = 0 if not best_bid or not best_ask else best_ask - best_bid
+        if best_bid and best_ask and spread > 4:
+            
+            desired_bid = best_bid + 1
+            desired_ask = best_ask - 1
+
+            # 计算可用挂单量
+            desired_buy = self.position_limits[symbol] - position
+            desired_sell = position - self.position_limits[symbol]
+
+            # 买盘挂单（正数表示买入）
+            if desired_buy > 0:
+                orders.append(Order(symbol, desired_bid, desired_buy))
+
+            # 卖盘挂单（负数表示卖出）
+            if desired_sell > 0:
+                orders.append(Order(symbol, desired_ask, -desired_sell))
+            
+        return []
+
+    def quick_trade(self, symbol: str, state: TradingState, amount: int) -> Tuple[list, int]:
+        """
+        快速交易函数：
+        给定商品名和所需数量(amount)，正数代表买入，负数代表卖出
+        返回尽可能的最佳orders和剩余数量
+        """
+        orders = []
+        order_depth = state.order_depths[symbol]
+        position = state.position.get(symbol, 0)
+
+        if amount > 0:
+            for price, sell_amount in sorted(order_depth.sell_orders.items()):
+                max_amount = min(-sell_amount, self.position_limits[symbol] - position, amount)
+                if max_amount > 0:
+                    orders.append(Order(symbol, price, max_amount))
+                    position += max_amount
+                    amount -= max_amount
+                if amount == 0:
+                    break
+
+        elif amount < 0 :
+            for price, buy_amount in sorted(order_depth.buy_orders.items()):
+                max_amount = min(buy_amount, position + self.position_limits[symbol], -amount) #amount已经是负数，卖出
+                if max_amount > 0:
+                    #卖出
+                    orders.append(Order(symbol, price, -max_amount))
+                    position -= max_amount
+                    amount += max_amount
+
+                if amount == 0:
+                    break
+        
+        return orders, amount
+
+    def trade_delta(self, symbol: str, state: TradingState, delta1: float, delta2: float) -> List[Order]:
+        orders = []
+        position = state.position.get(symbol, 0)
+        order_depth = state.order_depths[symbol]
+        fair_value = self.calculate_fair_value(order_depth)
+        z_score1 = (delta1 - self.delta1_mean) / self.delta1_std
+        z_score2 = (delta2 - self.delta2_mean) / self.delta2_std
+        scale1 = min(1,  (z_score1 / 3))
+        scale2 = min(1,  (z_score2 / 3))
+        limit = self.position_limits[symbol]
+ 
+        
+        if abs(z_score1) < 0.3 and abs(z_score2) < 0.3:
+            #清仓
+            logger.print("Clearing")
+            if position > 0:
+                sell_orders, _ = self.quick_trade(symbol, state, -position)#传入负数代表卖出
+                position -= sum( -order.quantity for order in sell_orders)
+                orders.extend(sell_orders)
+            if position < 0:
+                buy_orders, _ = self.quick_trade(symbol, state, -position)#传入正数代表买入
+                position += sum( order.quantity for order in buy_orders)
+                orders.extend(buy_orders)
+            self.zscore1_max = 2
+            self.zscore2_max = 2
+            self.pairing_amount1 = 0
+            self.pairing_amount2 = 0
+
+        #价差过滤条件
+        if abs(z_score1) > 2 and abs(z_score1) > self.zscore1_max + self.zscore1_step:
+            #更新z_score 最大值
+            logger.print(f"New zscore1: {self.zscore1_max}")
+            self.zscore1_max = abs(z_score1)
+            if z_score1 > 0:
+                #价差为正，做空
+                _, max_sell_amount = self.get_available_amount(symbol, state)
+                sell_amount = int(min(max_sell_amount, limit + position) * scale1 * (1- (position + limit) / (2 * limit)))
+                self.pairing_amount1 -= sell_amount
+                sell_orders, _ = self.quick_trade(symbol, state, -sell_amount)
+                orders.extend(sell_orders)
+            elif z_score1 < 0:
+                #价差为负，做多
+                max_buy_amount, _ = self.get_available_amount(symbol, state)
+                buy_amount = int(min(max_buy_amount, limit - position) * scale1 * (1 - (limit - position) / (2 * limit)))
+                self.pairing_amount1 += buy_amount
+                buy_orders, _ = self.quick_trade(symbol, state, buy_amount)
+                orders.extend(buy_orders)
+
+        if abs(z_score2) > 2 and z_score2 > self.zscore2_max + self.zscore2_step:
+            logger.print(f"New zscore2: {self.zscore2_max}")
+            self.zscore2_max = abs(z_score2)
+            if z_score2 > 0:
+                #价差为正，做空
+                _, max_sell_amount = self.get_available_amount(symbol, state)
+                sell_amount = int(min(max_sell_amount, limit + position) * scale2 * (1 - (position + limit)/ (2 * limit)))
+                self.pairing_amount2 -= sell_amount
+                sell_orders, _ = self.quick_trade(symbol, state, -sell_amount)
+                orders.extend(sell_orders)
+            elif z_score2 < 0:
+                #价差为负，做多
+                max_buy_amount, _ = self.get_available_amount(symbol, state)
+                buy_amount = int(min(max_buy_amount, limit - position) * scale2 * (1 - (limit - position) / (2 * limit)))
+                self.pairing_amount2 += buy_amount
+                buy_orders, _ = self.quick_trade(symbol, state, buy_amount)
+                orders.extend(buy_orders)
+            
         return orders
     
     def generate_orders_basket1(self, symbol: str, state: TradingState, delta1: float, delta2: float) -> List[Order]:
@@ -319,16 +424,10 @@ class BasketStrategy(Strategy):
         position = state.position.get(symbol, 0)
         order_depth = state.order_depths[symbol]
         fair_value = self.calculate_fair_value(order_depth)
-        
-        if delta1 != 0:
-            orders = []
-            scale = min(1, (delta1 - self.delta1_mean) / 3 * self.delta1_std)
-        if delta2 != 0:
-            orders = []
-
+        orders.extend(self.trade_delta(symbol, state, delta1, 0))
         #剩余仓位做市
-        orders.extend(self.marketing_order(symbol, state))
-
+        position -= sum([order.quantity for order in orders])
+        orders.extend(self.marketing_order(symbol, state, position))
         return orders
 
     def generate_orders_basket2(self, symbol: str, state: TradingState, delta1: float, delta2: float) -> List[Order]:
@@ -336,6 +435,10 @@ class BasketStrategy(Strategy):
         position = state.position.get(symbol, 0)
         order_depth = state.order_depths[symbol]
         fair_value = self.calculate_fair_value(order_depth)
+        orders.extend(self.trade_delta(symbol, state, 0, delta2))
+        #剩余仓位做市
+        position -= sum([order.quantity for order in orders])
+        orders.extend(self.marketing_order(symbol, state, position))
         return orders
 
     def generate_orders_croissant(self, symbol: str, state: TradingState, delta1: float, delta2: float) -> List[Order]:
@@ -343,20 +446,56 @@ class BasketStrategy(Strategy):
         position = state.position.get(symbol, 0)
         order_depth = state.order_depths[symbol]
         fair_value = self.calculate_fair_value(order_depth)
+        if self.rest_orders_amount[symbol] != 0:
+            liquid_orders, rest_amount = self.quick_trade(symbol, state, self.rest_orders_amount[symbol])
+            liquid_amount = sum([order.quantity for order in liquid_orders])
+            self.rest_orders_amount[symbol] -= liquid_amount
+            orders.extend(liquid_orders)
+        #直接根据pairing amount下单
+        pair_orders, rest_amount = self.quick_trade(symbol, state,  - 6 * self.pairing_amount1 - 4 * self.pairing_amount2)
+        self.rest_orders_amount[symbol] += rest_amount
+        orders.extend(pair_orders)
+        #剩余仓位做市
+        position -= sum([order.quantity for order in orders])
+        orders.extend(self.marketing_order(symbol, state, position))
         return orders
         
     def generate_orders_jams(self, symbol: str, state: TradingState, delta1: float, delta2: float) -> List[Order]:
         orders = []
         position = state.position.get(symbol, 0)
+        if self.rest_orders_amount[symbol] != 0:
+            liquid_orders, rest_amount = self.quick_trade(symbol, state, self.rest_orders_amount[symbol])
+            liquid_amount = sum([order.quantity for order in liquid_orders])
+            self.rest_orders_amount[symbol] -= liquid_amount
+            orders.extend(liquid_orders)
+
         order_depth = state.order_depths[symbol]
         fair_value = self.calculate_fair_value(order_depth)
+        pair_orders, rest_amount = self.quick_trade(symbol, state,  - 3 * self.pairing_amount1 - 2 * self.pairing_amount2)
+        self.rest_orders_amount[symbol] += rest_amount
+        orders.extend(pair_orders)
+        #剩余仓位做市
+        position -= sum([order.quantity for order in orders])
+        orders.extend(self.marketing_order(symbol, state, position))
         return orders
         
     def generate_orders_djembes(self, symbol: str, state: TradingState, delta1: float, delta2: float) -> List[Order]:
         orders = []
         position = state.position.get(symbol, 0)
         order_depth = state.order_depths[symbol]
+        if self.rest_orders_amount[symbol] != 0:
+            liquid_orders, rest_amount = self.quick_trade(symbol, state, self.rest_orders_amount[symbol])
+            liquid_amount = sum([order.quantity for order in liquid_orders])
+            self.rest_orders_amount[symbol] -= liquid_amount
+            orders.extend(liquid_orders)
+
         fair_value = self.calculate_fair_value(order_depth)
+        pair_orders, rest_amount = self.quick_trade(symbol, state,  - 1 * self.pairing_amount1)
+        self.rest_orders_amount[symbol] += rest_amount
+        orders.extend(pair_orders)        
+        #剩余仓位做市
+        position -= sum([order.quantity for order in orders])
+        orders.extend(self.marketing_order(symbol, state, position))
         return orders
             
     def generate_orders(self, state: TradingState) -> Dict[Symbol, List[Order]]:
@@ -373,21 +512,14 @@ class BasketStrategy(Strategy):
         delta1 = self.get_price_delta_basket1(state)
         delta2 = self.get_price_delta_basket2(state)
 
-        #价差过滤条件
-        if abs(delta1 - self.delta1_mean) < self.delta1_std:
-            delta1 = 0
-        
-        if abs(delta2 - self.delta2_mean) < self.delta2_std:
-            delta2 = 0
-
-
         # 遍历处理所有相关产品
         for symbol in self.symbols:
             if symbol in state.order_depths:
                 # 生成该symbol的订单...
                 handler = strategy_map.get(symbol)
                 orders[symbol] = handler(symbol, state, delta1, delta2)
-
+                logger.print(f"orders: {orders[symbol]}")
+    
         return orders
 
     def run(self, state: TradingState) -> Tuple[Dict[Symbol, List[Order]], dict]:

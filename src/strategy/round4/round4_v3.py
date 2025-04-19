@@ -7,6 +7,7 @@ import jsonpickle
 import math
 from collections import deque
 
+
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
@@ -173,30 +174,27 @@ class KelpStrategy(Strategy):
         self.trader_data = {}
         self.position_history = []
 
-    def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """使用买卖加权的price计算fair_value"""
-
+    def calculate_fair_value(self, order_depth) -> float:
         def weighted_avg(prices_vols, n=3):
-            """使用NumPy计算加权平均价格"""
-            # 按价格排序（买单降序，卖单升序）
-            is_buy = isinstance(prices_vols, dict) and len(prices_vols) > 0 and next(iter(prices_vols.values())) > 0
-            sorted_orders = sorted(prices_vols.items(), key=lambda x: x[0], reverse=is_buy)[:n]
+            total_volume = 0
+            price_sum = 0
+            # 按价格排序（买单调降序，卖单调升序）
+            sorted_orders = sorted(prices_vols.items(),
+                                   key=lambda x: x[0],
+                                   reverse=isinstance(prices_vols, dict))
 
-            if not sorted_orders:
-                return 0
-
-            # 转换为NumPy数组进行计算
-            prices = np.array([price for price, _ in sorted_orders])
-            volumes = np.array([abs(vol) for _, vol in sorted_orders])
-
-            # 计算加权平均价
-            if volumes.sum() > 0:
-                return np.sum(prices * volumes) / volumes.sum()
-            return 0
+            # 取前n档或全部可用档位
+            for price, vol in sorted_orders[:n]:
+                abs_vol = abs(vol)
+                price_sum += price * abs_vol
+                total_volume += abs_vol
+            return price_sum / total_volume if total_volume > 0 else 0
 
         # 计算买卖方加权均价
-        buy_avg = weighted_avg(order_depth.buy_orders)
-        sell_avg = weighted_avg(order_depth.sell_orders)
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+
+        # 返回中间价
         return (buy_avg + sell_avg) / 2
 
     def generate_orders(self, state: TradingState) -> List[Order]:
@@ -379,18 +377,13 @@ class RainforestResinStrategy(Strategy):
 
 
 class SquidInkStrategy(Strategy):
-    def __init__(self, symbol: str, position_limit: int, ma_window: int = 200):
+    def __init__(self, symbol: str, position_limit: int, ma_window: int = 200,
+                 max_deviation: int = 200, band_width: float = 30, take_spread: float = 10, break_step: float = 15):
         super().__init__(symbol, position_limit)
 
-        # 策略参数
-        self.ma_window = ma_window
-        # 策略历史数据
-        self.fair_value_history = deque(maxlen=ma_window)
-        self.fair_value_ma200_history = deque(maxlen=ma_window)
-        self.current_mode = "No_action"
-        self.ma_middle = 0
-        self.breakout_times = 0
-        self.needle_direction = 0  # 1:上涨突破 -1:下跌突破
+        self.timestamp = 0
+        self.open_price = 1931
+        self.direction = 0
 
     def calculate_fair_value(self, order_depth) -> float:
         def weighted_avg(prices_vols, n=3):
@@ -416,109 +409,30 @@ class SquidInkStrategy(Strategy):
         return (buy_avg + sell_avg) / 2
 
     def generate_orders(self, state) -> List[Order]:
+
         orders = []
         order_depth = state.order_depths[self.symbol]
         current_position = state.position.get(self.symbol, 0)
 
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
+        best_bid_amount = order_depth.buy_orders[best_bid]
+        best_ask_amount = order_depth.sell_orders[best_ask]
 
         fair_value = self.calculate_fair_value(state.order_depths[self.symbol])
-        # 保存fair_value
-        self.fair_value_history.append(fair_value)
-        if len(self.fair_value_history) > self.ma_window:
-            self.fair_value_history.popleft()
 
-        if len(self.fair_value_history) >= 200:
-            ma = np.mean(list(self.fair_value_history)[-200:])
-        else:
-            ma = fair_value
+        if fair_value > self.open_price + 50:
+            available_sell = 50 + current_position
+            if available_sell > 0:
+                sell_amt = min(-best_ask_amount, available_sell)
+                orders.append(Order(self.symbol, best_bid, -math.floor(sell_amt)))
 
-        available_buy = 50 - current_position
-        available_sell = 50 + current_position
+        elif fair_value < self.open_price - 40:
+            available_buy = 50 - current_position
+            if available_buy > 0:
+                buy_amt = min(best_bid_amount, available_buy)
+                orders.append(Order(self.symbol, best_ask, math.floor(buy_amt)))
 
-        ## ================================= 正式策略 ================================= ##
-        # needle mode 时
-        if (self.current_mode == "action"):
-            # 无论仓位是否满，只要价格回归优先平仓
-            if fair_value >= ma + 10 and current_position > 0 and self.needle_direction == -1:
-                for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                    if bid_price >= ma - 10:
-                        quantity = min(bid_volume, current_position)
-                        orders.append(Order(self.symbol, bid_price, -quantity))
-                        current_position -= quantity
-                        if current_position == 0: break
-                return orders
-
-            elif fair_value <= ma + 10 and current_position < 0 and self.needle_direction == 1:
-                for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-                    if ask_price <= ma - 10:
-                        quantity = min(-ask_volume, -current_position)
-                        orders.append(Order(self.symbol, ask_price, quantity))
-                        current_position += quantity
-                        if current_position == 0: break
-                return orders
-
-                # 重置状态
-            if current_position == 0:
-                self.current_mode = "No_action"
-                self.needle_direction = 0
-                return orders
-            # 如果仓位还没满，且价格持续下跌
-            elif abs(current_position) < self.position_limit:
-                # 持续吃单直到满仓
-                if self.needle_direction == -1:  # 下跌插针
-                    for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-                        if ask_price < ma - 30:
-                            quantity = min(-ask_volume, available_buy)
-                            if quantity > 0 and current_position + quantity < 45:  # 仓位控制
-                                orders.append(Order(self.symbol, ask_price, quantity))
-                                available_buy -= quantity
-                        if ask_price < ma - 120:  # 极端情况，少量仓位拉低均价
-                            quantity = min(-ask_volume, available_buy)
-                            if quantity > 0:
-                                orders.append(Order(self.symbol, ask_price, quantity))
-                                available_buy -= quantity
-
-
-                elif self.needle_direction == 1:  # 上涨插针
-                    for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                        if bid_price > ma + 30:
-                            quantity = min(bid_volume, available_sell)
-                            if quantity > 0 and current_position + quantity > -45:  # 仓位控制
-                                orders.append(Order(self.symbol, bid_price, -quantity))
-                                available_sell -= quantity
-                        if bid_price > ma + 120:  # 极端情况，少量仓位抬高均价
-                            quantity = min(bid_volume, available_sell)
-                            if quantity > 0:
-                                orders.append(Order(self.symbol, bid_price, -quantity))
-                                available_sell -= quantity
-            return orders
-        # 波幅超标检测
-        else:
-            # 下跌插针检测
-            if best_ask < ma - 30:  # 已检测到波动
-                for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-                    if ask_price < ma - 30:  # 低点
-                        quantity = min(-ask_volume, available_buy)
-                        if quantity > 0:
-                            orders.append(Order(self.symbol, ask_price, quantity))
-                            available_buy -= quantity
-                self.current_mode = "action"
-                self.needle_direction = -1
-                return orders
-
-            # 上涨插针检测
-            elif best_bid > ma + 30:  # 已检测到波动
-                for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                    if bid_price > ma + 30:  # 高点
-                        quantity = min(bid_volume, available_sell)
-                        if quantity > 0:
-                            orders.append(Order(self.symbol, bid_price, -quantity))
-                            available_sell -= quantity
-                self.current_mode = "action"
-                self.needle_direction = 1
-                return orders
         return orders
 
     def save_state(self, state):
@@ -762,10 +676,11 @@ class BasketStrategy(Strategy):
         current_diff = price_diffs[basket]
         # 添加长度检查，避免IndexError
         entry_diff = self.price_diff_history[basket][-2] if len(self.price_diff_history[basket]) >= 2 else current_diff
-        stop_loss_threshold = entry_diff * 1.2  # 例如，价差翻倍则止损
+        stop_loss_threshold = entry_diff * 2  # 例如，价差翻倍则止损
 
         if (current_diff < 0 and current_diff < stop_loss_threshold) or (
                 current_diff > 0 and current_diff > stop_loss_threshold):
+            logger.print(f"------------------{basket} current_diff {current_diff:.2f}---entry_diff--- {entry_diff:.2f}")
             # 平仓逻辑：反向操作当前仓位
             position = state.position.get(basket, 0)
             if position != 0:
@@ -820,6 +735,8 @@ class BasketStrategy(Strategy):
                         buyable = min(remaining_buy, -volume)
                         if buyable > 0:
                             basket_orders.append(Order(basket, price, buyable))
+                            logger.print(
+                                f"BUY {basket}: {buyable} @ {price} (相关性: {ewma_corr:.2f})")
                             remaining_buy -= buyable
                             if remaining_buy <= 0:
                                 break
@@ -838,6 +755,8 @@ class BasketStrategy(Strategy):
                         sellable = min(remaining_sell, volume)
                         if sellable > 0:
                             basket_orders.append(Order(basket, price, -sellable))
+                            logger.print(
+                                f"SELL {basket}: {sellable} @ {price} (相关性: {ewma_corr:.2f})")
                             remaining_sell -= sellable
                             if remaining_sell <= 0:
                                 break
@@ -1089,57 +1008,82 @@ class BasketStrategy(Strategy):
 
     def calculate_ewma_correlation(self, basket: str) -> float:
         """计算篮子价格与理论价值之间的EWMA相关性"""
-        # 需要至少5个数据点才能计算有意义的相关性
-        if len(self.basket_price_history[basket]) < 5 or len(self.basket_value_history[basket]) < 5:
-            return self.ewma_correlation[basket]  # 返回当前值
+        # 如果没有足够的数据，直接返回当前值
+        if (basket not in self.basket_price_history or basket not in self.basket_value_history or
+                len(self.basket_price_history[basket]) < 5 or len(self.basket_value_history[basket]) < 5):
+            return self.ewma_correlation.get(basket, 0.8)  # 使用默认值或当前值
 
-        prices = np.array(list(self.basket_price_history[basket]))
-        values = np.array(list(self.basket_value_history[basket]))
+        try:
+            # 转换为numpy数组
+            prices = np.array(list(self.basket_price_history[basket]), dtype=np.float64)
+            values = np.array(list(self.basket_value_history[basket]), dtype=np.float64)
 
-        # 计算价格和价值的变化率，避免绝对价格可能导致的虚假相关性
-        price_changes = np.diff(prices) / prices[:-1]
-        value_changes = np.diff(values) / values[:-1]
+            # 检查数据有效性
+            if (len(prices) != len(values) or
+                    np.any(~np.isfinite(prices)) or np.any(~np.isfinite(values)) or  # 检查无穷和NaN
+                    np.any(prices <= 0) or np.any(values <= 0)):  # 确保所有值都是正数
+                logger.print(f"Invalid data detected in correlation calculation for {basket}")
+                return self.ewma_correlation.get(basket, 0.8)
 
-        # 确保有足够的变化率数据
-        if len(price_changes) < 4 or len(value_changes) < 4:
-            return self.ewma_correlation[basket]
+            # 计算对数收益率而不是百分比变化，避免极端值
+            price_returns = np.log(prices[1:]) - np.log(prices[:-1])
+            value_returns = np.log(values[1:]) - np.log(values[:-1])
 
-        # 计算当前批次的相关系数
-        current_corr = np.corrcoef(price_changes, value_changes)[0, 1]
-        if np.isnan(current_corr):
-            return self.ewma_correlation[basket]
+            # 检查计算结果
+            if (len(price_returns) < 4 or len(value_returns) < 4 or
+                    np.any(~np.isfinite(price_returns)) or np.any(~np.isfinite(value_returns))):
+                logger.print(f"Invalid returns detected in correlation calculation for {basket}")
+                return self.ewma_correlation.get(basket, 0.8)
 
-        # 应用EWMA更新
-        new_corr = self.ewma_alpha * current_corr + (1 - self.ewma_alpha) * self.ewma_correlation[basket]
-        self.ewma_correlation[basket] = new_corr
+            # 使用masked array处理可能的异常值
+            mask = np.abs(price_returns) > 0.2  # 过滤掉超过20%的收益率变化
+            price_returns = np.ma.array(price_returns, mask=mask)
+            value_returns = np.ma.array(value_returns, mask=mask)
 
-        return new_corr
+            if price_returns.count() < 4 or value_returns.count() < 4:
+                logger.print(f"Not enough valid data points after filtering for {basket}")
+                return self.ewma_correlation.get(basket, 0.8)
+
+            # 手动计算相关系数，避免使用np.corrcoef
+            p_mean = price_returns.mean()
+            v_mean = value_returns.mean()
+            p_std = price_returns.std()
+            v_std = value_returns.std()
+
+            # 检查标准差是否为零
+            if p_std == 0 or v_std == 0:
+                logger.print(f"Zero standard deviation detected for {basket}")
+                return self.ewma_correlation.get(basket, 0.8)
+
+            # 计算协方差
+            cov = ((price_returns - p_mean) * (value_returns - v_mean)).mean()
+
+            # 计算相关系数
+            current_corr = cov / (p_std * v_std)
+
+            # 检查结果是否是有效的相关系数
+            if not (-1.0 <= current_corr <= 1.0) or np.isnan(current_corr):
+                logger.print(f"Invalid correlation coefficient: {current_corr} for {basket}")
+                return self.ewma_correlation.get(basket, 0.8)
+
+            # 应用EWMA更新
+            new_corr = self.ewma_alpha * current_corr + (1 - self.ewma_alpha) * self.ewma_correlation.get(basket, 0.8)
+            self.ewma_correlation[basket] = new_corr
+
+            return new_corr
+
+        except Exception as e:
+            # 捕获所有异常
+            logger.print(f"Error in calculating correlation for {basket}: {str(e)}")
+            return self.ewma_correlation.get(basket, 0.8)
 
 
 class VolcanicRockStrategy(Strategy):
-    def __init__(self, symbols: List[str], position_limits: dict, time_window: int , iv_threshold: float):
-        # 使用第一个symbol作为虚拟主产品
-        super().__init__(symbols[0], position_limits[symbols[0]])
-        self.symbols = symbols
-        self.K = [int(symbol.split("_")[-1]) for symbol in symbols[1:]]
-        self.position_limits = position_limits
-        self.time_window = time_window
-        self.iv_positive_threshold = iv_threshold
-        self.iv_negative_threshold = -iv_threshold
-        self.history = {}
-        self.T = 8/365
-        self.timestamp_high = 1000000
-        self.timestamp_unit = 100
-        self.betas = []
-        self.raw_ivs = []
-        self.ivs = []
-        self.base_ivs = deque(maxlen = time_window)
-        self.outlier_times = 0
+    def __init__(self, symbol: str, position_limit: int):
+        super().__init__(symbol, position_limit)
 
-
-        #VOLCANIC ROCK策略
-        self.symbol = "VOLCANIC_ROCK"
-        self.position_limit = 400
+        self.symbol = symbol
+        self.position_limit = position_limit
         self.active_atm = None
         self.current_mode = "Normal"
         self.active_time_value = 0
@@ -1149,7 +1093,6 @@ class VolcanicRockStrategy(Strategy):
         self.active_direction = 0
         self.up_close_value = 120
         self.down_close_value = 90
-
 
         self.voucher_config = {
             "VOLCANIC_ROCK_VOUCHER_9500": {
@@ -1185,13 +1128,8 @@ class VolcanicRockStrategy(Strategy):
                 "upper_bound": None
             },
         }
-        
 
-    #工具函数
-
-    def calculate_mid_price(self, order_depth):
-        """使用买卖加权的price计算mid_price"""
-
+    def calculate_mid_price(self, order_depth: OrderDepth) -> float:
         def weighted_avg(prices_vols, n=3):
             total_volume = 0
             price_sum = 0
@@ -1205,195 +1143,35 @@ class VolcanicRockStrategy(Strategy):
                 abs_vol = abs(vol)
                 price_sum += price * abs_vol
                 total_volume += abs_vol
-            return price_sum, total_volume if total_volume > 0 else 0
+            return price_sum / total_volume if total_volume > 0 else 0
 
         # 计算买卖方加权均价
-        buy_sum, buy_volume = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
-        sell_sum, sell_volume = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
-        if buy_volume + sell_volume == 0:
-            return 0
-        else:
-            return (buy_sum + sell_sum) / (buy_volume + sell_volume)
+        buy_avg = weighted_avg(order_depth.buy_orders, n=3)  # 买单簿是字典
+        sell_avg = weighted_avg(order_depth.sell_orders, n=3)  # 卖单簿是字典
+        if buy_avg and sell_avg:
+            return (buy_avg + sell_avg) / 2
+        elif buy_avg:
+            return buy_avg
+        elif sell_avg:
+            return sell_avg
 
-    @staticmethod
-    def norm_cdf(x: float) -> float:
-        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-    
-    def bs_call_price(self, S, K, T, sigma):
-        if T <= 0 or sigma <= 0:
-            return max(S - K, 0)  # 到期或波动率为0时的payoff
-
-        d1 = (math.log(S / K) + 0.5 * sigma ** 2 * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        call_price = S * self.norm_cdf(d1) - K * self.norm_cdf(d2)
-        return call_price
-
-    def implied_volatility_call_bisect(self, market_price, S, K, T, 
-                                    sigma_low=0.001, sigma_high=0.8, 
-                                    tol=1e-8, max_iter = 500):
-        def objective(sigma):
-            return self.bs_call_price(S, K, T, sigma) - market_price
-
-        low = sigma_low
-        high = sigma_high
-
-        f_low = objective(low)
-        f_high = objective(high)
-
-        if f_low > 0:
-            return sigma_low
-        if f_high < 0:
-            return sigma_high
-        
-        for _ in range(max_iter):
-            mid = 0.5 * (low + high)
-            f_mid = objective(mid)
-
-            if abs(f_mid) < tol:
-                return mid
-
-            if f_low * f_mid < 0:
-                high = mid
-                f_high = f_mid
-            else:
-                low = mid
-                f_low = f_mid
-
-        return 0.5 * (low + high)
-    
-
-    @staticmethod
-    def fit_vol_surface(m, iv):
-        m = np.array(m)
-        iv = np.array(iv)
-
-        # 原始二次拟合
-        X_full = np.column_stack([
-            np.ones_like(m),    # β₀
-            m,                  # β₁
-            m**2,               # β₂
-        ])
-        beta = np.linalg.lstsq(X_full, iv, rcond=None)[0]
-
-        return list(beta)
-
-    def compute_call_delta(self, S, K, T, sigma):
-        if T <= 0 or sigma <= 0:
-            return 1.0 if S > K else 0.0
-        d1 = (math.log(S / K) + 0.5 * sigma ** 2 * T) / (sigma * math.sqrt(T))
-        return self.norm_cdf(d1)
-    
-    def calculate_fair_value(self):
-        """
-        利用bs模型和波动率曲线拟合定价（含异常值处理和开口向上限制）
-        """
-        beta_update = True
-        self.ivs = []
-        self.raw_ivs = []
-
-        for symbol in self.symbols:
-            if symbol == "VOLCANIC_ROCK":
-                current_S = self.history["VOLCANIC_ROCK"]['mid_price_history'][-1]
-                continue
-
-            K = int(symbol.split("_")[-1])
-            data = self.history[symbol]
-            voucher_price = data["mid_price_history"][-1]
-
-            iv = self.implied_volatility_call_bisect(voucher_price, current_S, K, self.T)
-            
-            # 检查是否是边界异常值，决定是否更新 β
-            if self.betas != [] and (iv == 0.001 or iv == 0.8) and (self.betas[2] < 0):
-                beta_update = False
-
-            self.raw_ivs.append(iv)
-            self.ivs.append(iv)
-
-        # 计算 moneyness
-        m = np.log(np.array(self.K) / current_S) / np.sqrt(self.T)
-        m = np.array(m)
-        ivs = np.array(self.ivs)
-
-        # 过滤异常 iv：只保留合理范围内的点
-        valid_mask = (ivs > 0.01) & (ivs < 0.5)
-        m_filtered = m[valid_mask]
-        ivs_filtered = ivs[valid_mask]
-
-        if beta_update and len(m_filtered) >= 3:
-            self.betas = self.fit_vol_surface(m_filtered, ivs_filtered)
-
-        # 拟合 IV 曲线
-        X = np.column_stack([
-            np.ones_like(m),
-            m,
-            m**2
-        ])
-        iv_fitted = X @ self.betas
-
-        # 限制拟合后的 IV 在合理范围
-        iv_fitted = np.clip(iv_fitted, 0.01, 0.5)
-
-        # 平移 base_iv 修正
-        base_iv = self.betas[0]
-        self.base_ivs.append(base_iv)
-
-        scaled_rock_prices = (-5) * (self.history['VOLCANIC_ROCK']['mid_price_history'] / np.mean(self.history['VOLCANIC_ROCK']['mid_price_history']) - 1)
-        scaled_base_ivs = (self.base_ivs / np.mean(self.base_ivs) - 1)
-
-        base_iv_diff = scaled_base_ivs[-1] - scaled_rock_prices[-1]
-        base_iv_diff = 0
-        # 应用 base_iv_diff 修正
-        self.ivs = list(iv_fitted - base_iv_diff)
-
-        # 计算各期权 fair price
-        fair_prices = [
-            self.bs_call_price(current_S, self.K[i], self.T, sigma=self.ivs[i])
-            for i in range(len(self.symbols) - 1)
-        ]
-
-        return fair_prices
-
-    
-    def calculate_current_portfolio_delta(self, state: TradingState) -> float:
-        total_delta = 0.0
-        S = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK"])
-        if S is None:
-            return 0.0
-
-        for i in range(1, len(self.symbols)):
-            position = state.position.get(self.symbols[i], 0)
-            if position == 0:
-                continue
-
-            K = int(self.symbols[i].split("_")[-1])
-            price = self.calculate_mid_price(state.order_depths[self.symbols[i]])
-            sigma = self.ivs[i - 1]
-            if sigma is None:
-                continue
-
-            delta = self.compute_call_delta(S, K, self.T, sigma)
-            total_delta += delta * position
-
-        return total_delta
-    
     def calculate_time_value(self, voucher_symbol: str, ma_80, voucher_price: float) -> float:
         config = self.voucher_config.get(voucher_symbol)
         return config["strike"] + voucher_price - ma_80 if config else 0.0
 
-    def determine_ATM(self, ma_80) -> str:
-        if ma_80 >= 10300:
+    def determine_ATM(self, ma_100) -> str:
+        if ma_100 >= 10300:
             return "VOLCANIC_ROCK_VOUCHER_10500"
-        elif ma_80 >= 10050:
+        elif ma_100 >= 10050:
             return "VOLCANIC_ROCK_VOUCHER_10250"
-        elif ma_80 >= 9800:
+        elif ma_100 >= 9800:
             return "VOLCANIC_ROCK_VOUCHER_10000"
-        elif ma_80 >= 9550:
-            return "VOLCANIC_ROCK_VOUCHER_9750"  # 注意拼写错误需要修正
+        elif ma_100 >= 9550:
+            return "VOLCANIC_ROCK_VOUCHER_9750"
         else:
             return "VOLCANIC_ROCK_VOUCHER_9500"
-    
-    #下单函数
-    def generate_rock_orders(self, state: TradingState) -> Dict[str, List[Order]]:
+
+    def generate_orders(self, state: TradingState) -> Dict[str, List[Order]]:
         orders = {}
         rock_position = state.position.get("VOLCANIC_ROCK", 0)
 
@@ -1412,7 +1190,7 @@ class VolcanicRockStrategy(Strategy):
         else:
             self.ma_80 = S
             return orders
-        
+
         # 确定当前ATM
         current_atm = self.determine_ATM(self.ma_80)
         atm_order_depth = state.order_depths.get(current_atm, OrderDepth())
@@ -1421,9 +1199,24 @@ class VolcanicRockStrategy(Strategy):
             return orders
         time_value = self.calculate_time_value(current_atm, self.ma_80, atm_price)
 
+        for symbol in self.voucher_config:
+            if self.voucher_config[symbol]["strike"] > S + 200:
+                depth = state.order_depths.get(symbol, OrderDepth())
+                if not depth.buy_orders:
+                    continue
+                best_ask = min(depth.sell_orders.keys())
+                ask_vol = depth.sell_orders[best_ask]
+                current_pos = state.position.get(symbol, 0)
+                available_buy = 200 - current_pos
+                buy_quan = min(available_buy, -ask_vol)
+                if available_buy > 0 and best_ask < 5:
+                    if symbol not in orders:
+                        orders[symbol] = []
+                    orders[symbol].append(Order(symbol, best_ask, round(buy_quan)))
+
         # 如果当前是Normal模式
-        if self.current_mode =="Normal":
-            if time_value < 99:
+        if self.current_mode == "Normal":
+            if time_value < 95:
                 self.current_mode = "Abnormal"
                 self.active_atm = current_atm
                 self.active_time_value = time_value
@@ -1433,13 +1226,27 @@ class VolcanicRockStrategy(Strategy):
                 if qty > 0 and rock_order_depth.buy_orders:
                     best_bid = min(rock_order_depth.buy_orders.keys())
                     best_bid_amount = rock_order_depth.buy_orders[best_bid]
-                    sell_qty = min(50,best_bid_amount, qty)
+                    sell_qty = min(50, best_bid_amount, qty)
                     orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -round(sell_qty))]
                 # 卖出低行权价凭证
                 active_strike = self.voucher_config[current_atm]["strike"]
-
+                for symbol in self.voucher_config:
+                    if self.voucher_config[symbol]["strike"] <= active_strike:
+                        depth = state.order_depths.get(symbol, OrderDepth())
+                        current_pos = state.position.get(symbol, 0)
+                        available_sell = 200 + current_pos
+                        if available_sell > 0 and depth.buy_orders:
+                            # 按买单价降序处理所有档位
+                            sorted_bids = sorted(depth.buy_orders.keys(), reverse=True)
+                            for bid_price in sorted_bids:
+                                if available_sell <= 0:
+                                    break
+                                bid_vol = depth.buy_orders[bid_price]
+                                fillable = min(bid_vol, available_sell)
+                                orders.setdefault(symbol, []).append(Order(symbol, bid_price, -math.floor(fillable)))
+                                available_sell -= fillable
                 return orders
-            elif time_value > 111:
+            elif time_value > 140:
                 self.current_mode = "Abnormal"
                 self.active_atm = current_atm
                 self.active_time_value = time_value
@@ -1449,10 +1256,26 @@ class VolcanicRockStrategy(Strategy):
                 if qty > 0 and rock_order_depth.sell_orders:
                     best_ask = min(rock_order_depth.sell_orders.keys())
                     best_ask_amount = rock_order_depth.sell_orders[best_ask]
-                    buy_qty = min(50,-best_ask_amount, qty)
+                    buy_qty = min(50, -best_ask_amount, qty)
                     orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, round(buy_qty))]
                 # 买入低行权价凭证
                 active_strike = self.voucher_config[current_atm]["strike"]
+                for symbol in self.voucher_config:
+                    if self.voucher_config[symbol]["strike"] <= active_strike:
+                        depth = state.order_depths.get(symbol, OrderDepth())
+                        current_pos = state.position.get(symbol, 0)
+                        available_buy = 200 - current_pos
+
+                        if available_buy > 0 and depth.sell_orders:
+                            # 按卖单价降序处理所有档位
+                            sorted_ask = sorted(depth.sell_orders.keys())
+                            for ask_price in sorted_ask:
+                                if available_buy <= 0:
+                                    break
+                                ask_vol = depth.sell_orders[ask_price]
+                                fillable = min(-ask_vol, available_buy)
+                                orders.setdefault(symbol, []).append(Order(symbol, ask_price, math.floor(fillable)))
+                                available_buy -= fillable
                 return orders
 
         # 如果当前是Abnormal模式
@@ -1469,10 +1292,24 @@ class VolcanicRockStrategy(Strategy):
                     if available_sell > 0 and rock_order_depth.buy_orders:
                         best_bid = min(rock_order_depth.buy_orders.keys())
                         best_bid_amount = rock_order_depth.buy_orders[best_bid]
-                        sell_qty = min(50, best_bid_amount, math.floor(0.3*available_sell))
+                        sell_qty = min(50, best_bid_amount, math.floor(0.3 * available_sell))
                         orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -math.floor(sell_qty))]
 
-
+                    for symbol in self.voucher_config:
+                        active_strike = self.voucher_config[current_atm]["strike"]
+                        if self.voucher_config[symbol]["strike"] <= active_strike:
+                            depth = state.order_depths.get(symbol, OrderDepth())
+                            if not depth.buy_orders:
+                                continue
+                            best_bid = min(depth.buy_orders.keys())
+                            best_bid_amount = depth.buy_orders[best_bid]
+                            current_pos = state.position.get(symbol, 0)
+                            available_sell = 200 + current_pos
+                            sell_qty = min(best_bid_amount, math.floor(0.3 * available_sell))
+                            if sell_qty > 0:
+                                if symbol not in orders:
+                                    orders[symbol] = []
+                                orders[symbol].append(Order(symbol, best_bid, -sell_qty))
                     return orders
                 # 平仓逻辑
                 elif current_tv > self.up_close_value:
@@ -1484,8 +1321,28 @@ class VolcanicRockStrategy(Strategy):
                             best_ask_amount = rock_order_depth.sell_orders[best_ask]
                             available_buy = 400 - rock_position
                             if available_buy > 0:
-                                buy_qty = min(50, -best_ask_amount, math.floor(0.3*available_buy))
+                                buy_qty = min(50, -best_ask_amount, math.floor(0.3 * available_buy))
                                 orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, round(buy_qty))]
+                    for symbol in self.voucher_config:
+                        active_strike = self.voucher_config[current_atm]["strike"]
+                        if self.voucher_config[symbol]["strike"] <= active_strike + 300:
+                            current_pos = state.position.get(symbol, 0)
+                            if current_pos >= 0:
+                                continue
+                            else:
+                                total_position += current_pos
+                            depth = state.order_depths.get(symbol, OrderDepth())
+                            if not depth.sell_orders:
+                                continue  # 需要处理无买单情况
+                            best_ask = max(depth.sell_orders.keys())
+                            best_ask_amount = depth.sell_orders[best_ask]
+                            available_buy = 200 - current_pos  # 正确平仓数量
+                            if symbol not in orders:
+                                orders[symbol] = []
+                            if available_buy > 0:
+                                buy_qty = min(-best_ask_amount, math.floor(0.3 * available_buy))
+                                orders[symbol].append(Order(symbol, best_ask, buy_qty))
+
                     # 严格检查所有仓位
                     if total_position >= -40:
                         self.current_mode = "Normal"
@@ -1506,9 +1363,22 @@ class VolcanicRockStrategy(Strategy):
                     if availeble_buy > 0 and rock_order_depth.sell_orders:
                         best_ask = min(rock_order_depth.sell_orders.keys())
                         best_ask_amount = rock_order_depth.sell_orders[best_ask]
-                        buy_qty = min(50, best_ask_amount, math.floor(0.3*availeble_buy))
+                        buy_qty = min(50, best_ask_amount, math.floor(0.3 * availeble_buy))
                         orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, buy_qty)]
-
+                    for symbol in self.voucher_config:
+                        active_strike = self.voucher_config[current_atm]["strike"]
+                        if self.voucher_config[symbol]["strike"] <= active_strike:
+                            depth = state.order_depths.get(symbol, OrderDepth())
+                            if not depth.sell_orders:
+                                continue
+                            best_ask = min(depth.sell_orders.keys())
+                            best_ask_amount = depth.sell_orders[best_ask]
+                            current_pos = state.position.get(symbol, 0)
+                            available_buy = 200 - current_pos
+                            buy_qty = min(-best_ask_amount, math.floor(0.3 * available_buy))
+                            if symbol not in orders:
+                                orders[symbol] = []
+                            orders[symbol].append(Order(symbol, best_ask, buy_qty))
                     return orders
                 # 平仓逻辑
                 elif current_tv < self.down_close_value:
@@ -1520,8 +1390,27 @@ class VolcanicRockStrategy(Strategy):
                             best_bid_amount = rock_order_depth.buy_orders[best_bid]
                             available_sell = self.position_limit + rock_position
                             if available_sell > 0:
-                                sell_qty = min(50, best_bid_amount, math.floor(0.3*available_sell))
+                                sell_qty = min(50, best_bid_amount, math.floor(0.3 * available_sell))
                                 orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -sell_qty)]
+                    for symbol in self.voucher_config:
+                        active_strike = self.voucher_config[current_atm]["strike"]
+                        if self.voucher_config[symbol]["strike"] <= active_strike + 300:
+                            current_pos = state.position.get(symbol, 0)
+                            if current_pos <= 0:
+                                continue
+                            else:
+                                total_position += current_pos
+                            depth = state.order_depths.get(symbol, OrderDepth())
+                            if not depth.buy_orders:
+                                continue  # 需要处理无买单情况
+                            best_bid = max(depth.buy_orders.keys())
+                            best_bid_amount = depth.buy_orders[best_bid]
+                            available_sell = 200 + current_pos  # 正确平仓数量
+                            if symbol not in orders:
+                                orders[symbol] = []
+                            if available_sell > 0:
+                                sell_qty = min(best_bid_amount, math.floor(0.3 * available_sell))
+                                orders[symbol].append(Order(symbol, best_bid, -sell_qty))
 
                     # 严格检查所有仓位
                     if total_position <= 40:
@@ -1547,8 +1436,28 @@ class VolcanicRockStrategy(Strategy):
                             bound = self.voucher_config[current_atm]["lower_bound"]
                             available_buy = self.position_limit - rock_position
                             if available_buy > 0 and best_ask <= bound + 20:
-                                buy_qty = min(50, -best_ask_amount, math.floor(0.3*available_buy))
+                                buy_qty = min(50, -best_ask_amount, math.floor(0.3 * available_buy))
                                 orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_ask, buy_qty)]
+                                # 止损所有凭证
+                                for symbol in self.voucher_config:
+                                    active_strike = self.voucher_config[current_atm]["strike"]
+                                    if self.voucher_config[symbol]["strike"] <= active_strike + 300:
+                                        current_pos = state.position.get(symbol, 0)
+                                        if current_pos < 0:
+                                            total_position += current_pos
+                                        elif current_pos >= 0:
+                                            continue
+                                        depth = state.order_depths.get(symbol, OrderDepth())
+                                        if not depth.sell_orders:
+                                            continue  # 需要处理无买单情况
+                                        best_ask = max(depth.sell_orders.keys())
+                                        best_ask_amount = depth.sell_orders[best_ask]
+                                        available_buy = 200 - current_pos  # 平仓数量
+                                        if symbol not in orders:
+                                            orders[symbol] = []
+                                        if available_buy > 0:
+                                            buy_qty = min(-best_ask_amount, math.floor(0.3 * available_buy))
+                                            orders[symbol].append(Order(symbol, best_ask, buy_qty))
 
                     # 严格检查所有仓位
                     if total_position >= -40 or self.time_counter == 15:
@@ -1574,8 +1483,28 @@ class VolcanicRockStrategy(Strategy):
                             bound = self.voucher_config[current_atm]["upper_bound"]
                             available_sell = self.position_limit + rock_position
                             if available_sell > 0 and best_bid >= bound - 20:
-                                sell_qty = min(50, best_bid_amount, math.floor(0.3*available_sell))
+                                sell_qty = min(50, best_bid_amount, math.floor(0.3 * available_sell))
                                 orders["VOLCANIC_ROCK"] = [Order("VOLCANIC_ROCK", best_bid, -sell_qty)]
+                                # 止损所有凭证
+                                for symbol in self.voucher_config:
+                                    active_strike = self.voucher_config[current_atm]["strike"]
+                                    if self.voucher_config[symbol]["strike"] <= active_strike + 300:
+                                        current_pos = state.position.get(symbol, 0)
+                                        if current_pos > 0:
+                                            total_position += current_pos
+                                        elif current_pos <= 0:
+                                            continue
+                                        depth = state.order_depths.get(symbol, OrderDepth())
+                                        if not depth.buy_orders:
+                                            continue  # 需要处理无买单情况
+                                        best_bid = max(depth.buy_orders.keys())
+                                        best_bid_amount = depth.buy_orders[best_bid]
+                                        available_sell = 200 + current_pos  # 正确平仓数量
+                                        if symbol not in orders:
+                                            orders[symbol] = []
+                                        if available_sell > 0:
+                                            sell_qty = min(best_bid_amount, math.floor(0.3 * available_sell))
+                                            orders[symbol].append(Order(symbol, best_bid, -sell_qty))
 
                     # 严格检查所有仓位
                     if total_position <= 40 or self.time_counter == 20:
@@ -1587,284 +1516,374 @@ class VolcanicRockStrategy(Strategy):
 
                     return orders
         return orders
-    
 
-    def generate_orders_fair_value_arbitrage(self, state: TradingState) -> Tuple[Dict[str, List[Order]], float]:
-        """
-        根据fair price进行套利
-        """
-        orders = {}
-        total_delta_exposure = 0.0  # 用局部变量，不要用 self 记录，避免多次调用累加错
-
-        fair_prices = self.calculate_fair_value()
-
-
-        for i in range(1, len(self.symbols)):
-            order_depth = state.order_depths[self.symbols[i]]
-            mid_price = self.calculate_mid_price(order_depth)
-            fair_price = fair_prices[i - 1]
-            position = state.position.get(self.symbols[i], 0)
-            limit = self.position_limits[self.symbols[i]]
-
-            delta_p = fair_price - mid_price
-            orders_for_symbol = []
-
-            # 获取 strike 和基础价格
-            K = int(self.symbols[i].split("_")[-1])
-            S = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK"])
-            T = self.T
-            
-            sigma = self.ivs[i - 1]
-            raw_iv = self.raw_ivs[i - 1]
-
-            #logger.print(f"symbol: {self.symbols[i]}, delta_p: {delta_p}, delta_iv: {sigma - raw_iv}")
-            
-            # None check
-            if mid_price is None or fair_price is None or S is None or sigma is None:
-                continue
-
-            option_delta = self.compute_call_delta(S, K, T, sigma)
-
-            #利用iv来判断下单
-
-            delta_iv = sigma - raw_iv
-
-            #根据不同strick price 调整delta iv 阈值
-            '''
-            if K == 9500:
-                self.iv_positive_threshold = 0.006
-                self.iv_negative_threshold = -0.01
-
-            if K == 9750:
-                self.iv_positive_threshold = 0.025
-                self.iv_negative_threshold = -0.015
-
-            if K == 10000:
-                self.iv_positive_threshold = 0.008
-                self.iv_negative_threshold = -0.018
-            
-            if K == 10250:
-                self.iv_positive_threshold = 0.01
-                self.iv_negative_threshold = -0.01
-            
-            if K == 10500:
-                self.iv_positive_threshold = 0.005
-                self.iv_negative_threshold = -0.006
-            '''
-            if delta_iv > self.iv_positive_threshold:
-                #市场iv偏低，买入
-                for price, amount in order_depth.sell_orders.items():
-                        if self.symbols[i] not in orders:
-                            orders[self.symbols[i]] = []
-                        amount = -min(-amount, limit - position)
-                        #amount = int(min(abs(delta_iv - self.iv_positive_threshold)/ 0.5, 1) * amount)
-                        orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount)) #买入
-                        position += amount
-                        total_delta_exposure += option_delta * (-amount)
-
-            if delta_iv < self.iv_negative_threshold:
-                #市场iv偏高，卖出
-                for price, amount in order_depth.buy_orders.items(): 
-                        if self.symbols[i] not in orders:
-                            orders[self.symbols[i]] = []
-                        amount = min(amount, position + limit)
-                        #根据价差比例下单
-                        #amount = int(min(abs(self.iv_negative_threshold - delta_iv)/ 0.5, 1) * amount)
-                        orders[self.symbols[i]].append(Order(self.symbols[i], price,  -amount)) #卖出
-                        position -= amount
-                        total_delta_exposure += option_delta * amount * -1
-
-            if orders_for_symbol:
-                orders[self.symbols[i]] = orders_for_symbol
-
-        return orders, total_delta_exposure
-    
-    def generate_orders_pair_arbitrage(self, state: TradingState, exist_orders: dict) -> Tuple[Dict[str, List[Order]], float]:
-        orders = {}
-        total_delta_exposure = 0.0
-
-        current_positions = state.position.copy()
-        ivs = self.raw_ivs  
-        fitted_ivs = self.ivs 
-
-        pairs_candidate = []
-
-        for i in range(1, len(self.symbols)):
-            for j in range(i + 1, len(self.symbols)):
-                symbol_i = self.symbols[i]
-                symbol_j = self.symbols[j]
-                iv_i = ivs[i-1]
-                iv_j = ivs[j-1]
-                fitted_iv_i = fitted_ivs[i-1]
-                fitted_iv_j = fitted_ivs[j-1]
-
-                delta_iv_i = fitted_iv_i - iv_i
-                delta_iv_j = fitted_iv_j - iv_j
-                delta_diff = abs(delta_iv_i - delta_iv_j)
-
-                if delta_diff > self.iv_positive_threshold:
-                    pairs_candidate.append((symbol_i, symbol_j, delta_iv_i, delta_iv_j, delta_diff))
-
-        for symbol_i, symbol_j, delta_iv_i, delta_iv_j, delta_diff in pairs_candidate:
-            pos_i = current_positions.get(symbol_i, 0)
-            pos_j = current_positions.get(symbol_j, 0)
-            limit_i = self.position_limits.get(symbol_i, 0)
-            limit_j = self.position_limits.get(symbol_j, 0)
-
-            depth_i = state.order_depths[symbol_i]
-            depth_j = state.order_depths[symbol_j]
-
-            if symbol_i not in orders:
-                orders[symbol_i] = []
-            if symbol_j not in orders:
-                orders[symbol_j] = []
-
-            # 根据 IV 差方向判断买谁、卖谁（吃市场）
-            if delta_iv_i < delta_iv_j:
-                # 买 i 卖 j
-                buy_symbol, sell_symbol = symbol_i, symbol_j
-                buy_depth, sell_depth = depth_i, depth_j
-                buy_iv, sell_iv = delta_iv_i, delta_iv_j
-            else:
-                # 买 j 卖 i
-                buy_symbol, sell_symbol = symbol_j, symbol_i
-                buy_depth, sell_depth = depth_j, depth_i
-                buy_iv, sell_iv = delta_iv_j, delta_iv_i
-
-            buy_orders = sorted(buy_depth.sell_orders.items())  # 买一方吃卖单
-            sell_orders = sorted(sell_depth.buy_orders.items(), reverse=True)  # 卖一方吃买单
-
-            buy_position = current_positions.get(buy_symbol, 0)
-            sell_position = current_positions.get(sell_symbol, 0)
-            buy_limit = self.position_limits.get(buy_symbol, 0)
-            sell_limit = self.position_limits.get(sell_symbol, 0)
-
-            max_qty = min(buy_limit - buy_position, sell_limit - sell_position, int(delta_diff * 100))
-            filled_qty = 0
-
-            for (buy_price, buy_amt), (sell_price, sell_amt) in zip(buy_orders, sell_orders):
-                trade_qty = min(-buy_amt, sell_amt, max_qty - filled_qty)
-                if trade_qty <= 0:
-                    continue
-
-                orders[buy_symbol].append(Order(buy_symbol, buy_price, trade_qty))
-                orders[sell_symbol].append(Order(sell_symbol, sell_price, -trade_qty))
-
-                total_delta_exposure += buy_iv * trade_qty + sell_iv * trade_qty
-                filled_qty += trade_qty
-
-                if filled_qty >= max_qty:
-                    break
-
-            # 合并已有订单
-            if symbol_i in exist_orders:
-                orders[symbol_i].extend(exist_orders[symbol_i])
-            if symbol_j in exist_orders:
-                orders[symbol_j].extend(exist_orders[symbol_j])
-
-        return orders, total_delta_exposure
-
-    def generate_orders_delta_hedge(self, state: TradingState, total_delta_exposure: float) -> List[Order]:
-        orders = []
-        symbol = "VOLCANIC_ROCK"
-        position = state.position.get(symbol, 0)
-        limit = self.position_limits[symbol]
-
-        mid_price = self.calculate_mid_price(state.order_depths[symbol])
-        if mid_price is None:
-            return []
-
-        target = -int(round(total_delta_exposure))  # delta hedge 理论目标
-        diff = target - position
-
-        if diff > 0:
-            # 需要买入
-            volume = min(diff, limit - position)
-            if volume > 0:
-                orders.append(Order(symbol, int(mid_price - 1), volume))
-        elif diff < 0:
-            # 需要卖出
-            volume = min(-diff, position + limit)
-            if volume > 0:
-                orders.append(Order(symbol, int(mid_price + 1), -volume))
-
-        return orders
-    
-    def generate_orders(self, state: TradingState) -> Dict[str, List[Order]]:
-        orders = {}
-        #先检查当前仓位的hedge情况
-        #current_delta = self.calculate_current_portfolio_delta(state)
-
-        arbitrage_orders, total_delta_exposure = self.generate_orders_fair_value_arbitrage(state)
-
-        #arbitrage_orders, total_delta_exposure = self.generate_orders_pair_arbitrage(state, exist_orders=arbitrage_orders)
-
-        #hedge_orders = self.generate_orders_delta_hedge(state, total_delta_exposure)
-
-        rock_orders = self.generate_rock_orders(state)
-
-        orders.update(arbitrage_orders)
-        if rock_orders:
-            if "VOLCANIC_ROCK" in rock_orders:
-                orders["VOLCANIC_ROCK"] = rock_orders['VOLCANIC_ROCK']
-
-
-        return orders
-    
+    def save_state(self, state):
+        return {}
 
     def load_state(self, state):
-        self.T -= self.timestamp_unit/self.timestamp_high/365
-        logger.print("self.T: ", self.T)
-        #储存每个产品的mid_price
-        rock_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK"])
-        voucher_9500_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_9500"])
-        voucher_9750_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_9750"])
-        voucher_10000_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_10000"])
-        voucher_10250_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_10250"])
-        voucher_10500_mid_price = self.calculate_mid_price(state.order_depths["VOLCANIC_ROCK_VOUCHER_10500"])
+        pass
+
+
+class MacaronStrategy(Strategy):
+    """马卡龙交易策略"""
+
+    def __init__(self,
+                 symbol: str,
+                 position_limit: int,
+                 conversion_limit: int = 10,
+                 sun_threshold: int = 60,
+                 sun_coeff: float = 0.10,
+                 sugar_threshold: int = 40,
+                 sugar_coeff: float = 0.08):
+        super().__init__(symbol, position_limit)
+        self.conversion_limit = conversion_limit
+        self.storage_cost = 0.1
+
+        self.sun_threshold = sun_threshold
+        self.sun_coeff = sun_coeff
+        self.sugar_threshold = sugar_threshold
+        self.sugar_coeff = sugar_coeff
+
+        # 历史数据
+        self.fair_value_history = deque(maxlen=100)
+        self.observation_history = deque(maxlen=100)
+        self.position_history = deque(maxlen=100)
+        self.conversion_count = 0
+        self.position_entries = {}
         
-        mid_prices = {
-            "VOLCANIC_ROCK": rock_mid_price,
-            "VOLCANIC_ROCK_VOUCHER_9500": voucher_9500_mid_price,
-            "VOLCANIC_ROCK_VOUCHER_9750": voucher_9750_mid_price,
-            "VOLCANIC_ROCK_VOUCHER_10000": voucher_10000_mid_price,
-            "VOLCANIC_ROCK_VOUCHER_10250": voucher_10250_mid_price,
-            "VOLCANIC_ROCK_VOUCHER_10500": voucher_10500_mid_price,
+        #计算持仓成本数据
+        self.orders_history = {
+            'long': [], 
+            'short': []
         }
 
+    
+    def calculate_avg_cost(self, state: TradingState):
+        """
+        实时从 own_trades 中读取成交信息，计算平均持仓成本与当前净持仓
+        自动处理多空平仓冲销逻辑
+        """
+        if not hasattr(self, "processed_trades"):
+            self.processed_trades = set()
+            self.orders_history = {
+                'long': [],
+                'short': []
+            }
+        def offset_inventory(order_list, amount):
+            while amount > 0 and order_list:
+                price, qty = order_list[0]
+                if qty <= amount:
+                    amount -= qty
+                    order_list.pop(0)
+                else:
+                    order_list[0] = (price, qty - amount)
+                    amount = 0
+            return amount
         
-        for symbol in self.symbols:
-            if symbol not in self.history:
-                self.history[symbol] = {}
-                self.history[symbol]["mid_price_history"] = deque(maxlen=self.time_window)
+        own_trades = state.own_trades.get(self.symbol, [])
+        for trade in own_trades:
+            trade_id = (trade.seller, trade.buyer, trade.price, trade.quantity, trade.timestamp)
+            if trade_id in self.processed_trades:
+                continue
+            self.processed_trades.add(trade_id)
             
-            self.history[symbol]["mid_price_history"].append(mid_prices[symbol])
-        
-        for symbol in self.symbols:
-            if len(self.history[symbol]["mid_price_history"]) > self.time_window:
-                self.history[symbol]["mid_price_history"] = self.history[symbol]["mid_price_history"][-self.time_window:]
-                
-        if len(self.base_ivs) > self.time_window:
-            self.base_ivs.popleft()
 
-    def save_state(self, state):
-        pass
+            # 判断你是买还是卖
+            if trade.buyer == "SUBMISSION":
+                direction = 1
+            elif trade.seller == "SUBMISSION":
+                direction = -1
+            else:
+                continue  # 不属于你自己的成交，跳过
 
-class MagnificentMacaronsStrategy(Strategy):
-    def __init__(self, symbol, position_limit):
-        super().__init__(symbol, position_limit)
-    
-    def generate_orders(self, state: TradingState) -> Dict[str, List[Order]]:
+            price = trade.price
+            qty = trade.quantity
+
+            # 平仓处理逻辑（offset 对手方向）
+            if direction == 1:
+                # 如果有空头仓位，优先冲销
+                qty = offset_inventory(self.orders_history['short'], qty)
+                if qty > 0:
+                    self.orders_history['long'].append((price, qty))
+            else:
+                # 有多头仓位时优先冲销
+                qty = offset_inventory(self.orders_history['long'], qty)
+                if qty > 0:
+                    self.orders_history['short'].append((price, qty))
+
+        # 计算净仓与平均成本
+        long_qty = sum(q for _, q in self.orders_history['long'])
+        short_qty = sum(q for _, q in self.orders_history['short'])
+        net_pos = long_qty - short_qty
+
+        if net_pos > 0:
+            total_cost = sum(price * qty for price, qty in self.orders_history['long'])
+            avg_cost = total_cost / long_qty if long_qty else 0.0
+        elif net_pos < 0:
+            total_cost = sum(price * qty for price, qty in self.orders_history['short'])
+            avg_cost = total_cost / short_qty if short_qty else 0.0
+        else:
+            avg_cost = 0.0
+
+        return avg_cost, net_pos
+
+    def update_storage_cost(self, state: TradingState):
+        current_time = state.timestamp
+        # 清理过期持仓记录（假设每个时间戳间隔固定）
+        expired = [t for t in self.position_entries if current_time - t > 100]  # 假设100时间戳为周期
+        for t in expired:
+            del self.position_entries[t]
+        # 记录当前持仓
+        self.position_entries[current_time] = state.position.get(self.symbol, 0)
+        # 计算总仓储成本
+        total_storage_cost = 0.1 * sum(pos for pos in self.position_entries.values())
+        return total_storage_cost
+
+    def calculate_fair_value(self, order_depth: OrderDepth) -> float:
+        """计算市场公允价值"""
+
+        def weighted_avg(prices_vols, n=3):
+            """计算加权平均价格"""
+            if not prices_vols:
+                return 0
+
+            is_buy = isinstance(prices_vols, dict) and len(prices_vols) > 0 and next(iter(prices_vols.values())) > 0
+            sorted_orders = sorted(prices_vols.items(), key=lambda x: x[0], reverse=is_buy)[:n]
+
+            if not sorted_orders:
+                return 0
+
+            total_vol = sum(abs(vol) for _, vol in sorted_orders)
+            if total_vol == 0:
+                return 0
+
+            weighted_sum = sum(price * abs(vol) for price, vol in sorted_orders)
+            return weighted_sum / total_vol
+
+        buy_avg = weighted_avg(order_depth.buy_orders)
+        sell_avg = weighted_avg(order_depth.sell_orders)
+        if buy_avg > 0 and sell_avg > 0:
+            return (buy_avg + sell_avg) / 2
+        elif buy_avg > 0:
+            return buy_avg
+        elif sell_avg > 0:
+            return sell_avg
+        return 0
+
+    def should_convert(self, state: TradingState, conversion_type: str) -> bool:
+        """基于 avg_cost 判断是否可以通过 conversion 跨岛套利"""
+        if self.conversion_count >= self.conversion_limit:
+            return False
+
+        if not state.observations or "MAGNIFICENT_MACARONS" not in state.observations.conversionObservations:
+            return False
+
+        obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
+        position = state.position.get(self.symbol, 0)
+
+        avg_cost, net_pos = self.calculate_avg_cost(state)
+
+        # conversion 买入的成本
+        buy_cost = obs.askPrice + obs.transportFees + obs.importTariff
+        # conversion 卖出的收益
+        sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
+
+        min_profit = 0.1 # 利润门槛
+
+        if conversion_type == "BUY" and position < self.position_limit:
+            # 假设当前是空头，可以通过 conversion 买入来平空，或者反手做多
+            # 判断当前持仓成本是否远高于跨岛买入
+            return avg_cost > buy_cost + min_profit
+
+        elif conversion_type == "SELL" and position > -self.position_limit:
+            # 假设当前是多头，可以通过 conversion 卖出
+            return sell_revenue - avg_cost > min_profit
+
+        return False
+
+    def process_market_data(self, state: TradingState):
+        """处理市场数据并更新策略状态"""
+        position = state.position.get(self.symbol, 0)
+        self.position_history.append(position)
+
+        # 记录行情观察值
+        if state.observations and "MAGNIFICENT_MACARONS" in state.observations.conversionObservations:
+            self.observation_history.append(state.observations.conversionObservations["MAGNIFICENT_MACARONS"])
+
+        # 计算并记录当前公允价值
+        order_depth = state.order_depths.get(self.symbol, OrderDepth())
+        fair_value = self.calculate_fair_value(order_depth)
+        if fair_value > 0:
+            self.fair_value_history.append(fair_value)
+
+    def determine_optimal_conversions(self, state: TradingState) -> int:
+        """基于 avg_cost 判断并决定 conversion 数量"""
+        if not state.observations or "MAGNIFICENT_MACARONS" not in state.observations.conversionObservations:
+            return 0
+
+        position = state.position.get(self.symbol, 0)
+        obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
+        avg_cost, net_pos = self.calculate_avg_cost(state)
+
+        conversions = 0
+        min_profit = 0.1  # 可以调大点防止手续费侵蚀
+
+        buy_cost = obs.askPrice + obs.transportFees + obs.importTariff
+        sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
+
+        # 如果当前是空头或无仓位，可以从岛外买入（conversion）补仓/反手
+        if self.should_convert(state, "BUY"):
+            profit = avg_cost - buy_cost
+            if profit > min_profit:
+                max_buy = min(self.conversion_limit - self.conversion_count, self.position_limit - position)
+                conversions = max_buy
+
+        # 如果当前是多头，可以把仓位卖给岛外
+        elif self.should_convert(state, "SELL"):
+            profit = sell_revenue - avg_cost
+            if profit > min_profit:
+                max_sell = min(self.conversion_limit - self.conversion_count, net_pos)
+                conversions = -max_sell
+
+        return conversions
+
+    def generate_orders(self, state: TradingState) -> List[Order]:
+        """生成订单和转换请求"""
+        self.process_market_data(state)
+        avg_cost, net_pos = self.calculate_avg_cost(state)
+        logger.print(f"Net position: {net_pos}, Avg cost: {avg_cost}")
         orders = []
-        return []
-    
+        conversions = 0
+        order_depth = state.order_depths.get(self.symbol, OrderDepth())
+        position = state.position.get(self.symbol, 0)
+
+        # 如果没有订单深度数据
+        if not order_depth.buy_orders and not order_depth.sell_orders:
+            return orders
+
+        # 获取最佳买卖价格
+        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
+
+        # 计算市场公允价值
+        fair_value = self.calculate_fair_value(order_depth)
+
+        # 仓位调整系数 - 仓位越大，卖出意愿越强
+        position_factor = 0.25 * position / self.position_limit
+        adjusted_fair_value = fair_value - position_factor
+
+        # --- Pricing factors | 价格影响因素 ------------------------------
+        sunlight_bonus = 0.0
+        sugar_penalty = 0.0
+
+        if (state.observations
+                and "MAGNIFICENT_MACARONS" in state.observations.conversionObservations):
+            obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
+
+            # Sunlight makes macarons more valuable | 阳光越足，马卡龙越值钱
+            sunlight_bonus = max(0,
+                                 obs.sunlightIndex - self.sun_threshold) * self.sun_coeff
+
+            # High sugar price raises cost | 糖价越高，成本越高
+            sugar_penalty = max(0,
+                                obs.sugarPrice - self.sugar_threshold) * self.sugar_coeff
+
+        adjusted_fair_value = adjusted_fair_value + sunlight_bonus - sugar_penalty
+
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        # 设置买卖价格
+        buy_price = best_bid + 1
+        sell_price = best_ask - 1
+
+        # 确定买入量
+        available_buy = max(0, self.position_limit - position)
+        if available_buy > 0:
+            # 吃单逻辑：如果有比我们买价更便宜的卖单，直接吃入
+            for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
+                if ask_price < adjusted_fair_value:
+                    buy_volume = min(-ask_volume, available_buy)
+                    if buy_volume > 0:
+                        orders.append(Order(self.symbol, ask_price, buy_volume))
+                        available_buy -= buy_volume
+
+                        if available_buy <= 0:
+                            break
+                else:
+                    break
+
+            # 挂单逻辑：在当前最高买价上方挂买单
+            if available_buy > 0 and buy_price < best_ask:
+                buy_amount = min(available_buy, position)
+                orders.append(Order(self.symbol, buy_price, buy_amount))
+
+        # 确定卖出量
+        available_sell = max(0, position + self.position_limit)
+        if available_sell > 0:
+            # 吃单逻辑：如果有比我们卖价更高的买单，直接卖出
+            for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                if bid_price > adjusted_fair_value:
+                    sell_volume = min(bid_volume, available_sell)
+                    if sell_volume > 0:
+                        orders.append(Order(self.symbol, bid_price, -sell_volume))
+                        available_sell -= sell_volume
+
+                        if available_sell <= 0:
+                            break
+                else:
+                    break
+
+            # 挂单逻辑：在当前最低卖价下方挂卖单
+            if available_sell > 0 and position > 0 and sell_price > best_bid:
+                sell_amount = min(available_sell, position)
+                orders.append(Order(self.symbol, sell_price, -sell_amount))
+
+        return orders
+
+    def run(self, state: TradingState) -> Tuple[List[Order], dict, int]:
+        """执行策略主逻辑，同时返回订单、状态和转换请求"""
+        # 生成普通订单
+        orders = self.generate_orders(state)
+
+        # 确定最优的转换数量
+        conversions = self.determine_optimal_conversions(state)
+        logger.print(f"Converting {conversions}")
+        if conversions != 0:
+            self.conversion_count += abs(conversions)
+
+        # 保存策略状态
+        strategy_state = self.save_state(state)
+
+        return orders, strategy_state, conversions
+
+    def save_state(self, state) -> dict:
+        """保存策略状态"""
+        return {
+            "fair_value_history": list(self.fair_value_history),
+            "position_history": list(self.position_history),
+            "conversion_count": self.conversion_count
+        }
+
     def load_state(self, state):
-        pass
+        """加载策略状态"""
+        if not hasattr(state, 'traderData') or not state.traderData:
+            return
 
-    def save_state(self, state):
-        pass
+        try:
+            trader_data = json.loads(state.traderData)
+            if self.symbol in trader_data:
+                strategy_data = trader_data[self.symbol]
 
+                if "fair_value_history" in strategy_data:
+                    self.fair_value_history = deque(strategy_data["fair_value_history"], maxlen=100)
 
+                if "position_history" in strategy_data:
+                    self.position_history = deque(strategy_data["position_history"], maxlen=100)
+
+                if "conversion_count" in strategy_data:
+                    self.conversion_count = strategy_data["conversion_count"]
+        except Exception as e:
+            logger.print(f"Error loading state: {str(e)}")
 
 
 class Config:
@@ -1903,21 +1922,20 @@ class Config:
                 "delta2_threshold": 10,
                 "time_window": 100
             },
-            "VOLCANIC_ROCK_GROUP":{
+            "VOLCANIC_ROCK": {
                 "strategy_cls": VolcanicRockStrategy,
-                "symbols": ["VOLCANIC_ROCK", "VOLCANIC_ROCK_VOUCHER_9500", "VOLCANIC_ROCK_VOUCHER_9750", "VOLCANIC_ROCK_VOUCHER_10000", "VOLCANIC_ROCK_VOUCHER_10250", "VOLCANIC_ROCK_VOUCHER_10500"],
-                "position_limits": {
-                    "VOLCANIC_ROCK": 400,
-                    "VOLCANIC_ROCK_VOUCHER_9500": 200,
-                    "VOLCANIC_ROCK_VOUCHER_9750": 200,
-                    "VOLCANIC_ROCK_VOUCHER_10000": 200,
-                    "VOLCANIC_ROCK_VOUCHER_10250": 200,
-                    "VOLCANIC_ROCK_VOUCHER_10500": 200,
-                },
-                "time_window": 100,
-                "iv_threshold": 0.012
+                "symbol": "VOLCANIC_ROCK",
+                "position_limit": 400
             },
+            "MAGNIFICENT_MACARONS": {
+                "strategy_cls": MacaronStrategy,
+                "symbol": "MAGNIFICENT_MACARONS",
+                "position_limit": 75,
+                "conversion_limit": 10
+            }
         }
+
+
 class Trader:
     def __init__(self, product_config=None):
         # 使用默认 config，或外部传入 config
@@ -1931,7 +1949,6 @@ class Trader:
                 cls = config["strategy_cls"]
                 args = {k: v for k, v in config.items() if k != "strategy_cls" and k != "symbols"}
                 self.strategies[product] = cls(symbols=config["symbols"], **args)
-
             else:
                 # 常规产品初始化保持不变
                 cls = config["strategy_cls"]
@@ -1945,11 +1962,34 @@ class Trader:
 
         orders = {}
         new_trader_data = {}
-        for product, strategy in self.strategies.items():
-            if product in trader_data or product == "PICNIC_BASKET_GROUP" or product == "VOLCANIC_ROCK_GROUP":
+
+        # 先处理马卡龙转换请求
+        if "MAGNIFICENT_MACARONS" in self.strategies and (
+                "MAGNIFICENT_MACARONS" in state.order_depths or
+                (state.observations and "MAGNIFICENT_MACARONS" in state.observations.conversionObservations)):
+
+            strategy = self.strategies["MAGNIFICENT_MACARONS"]
+            if "MAGNIFICENT_MACARONS" in trader_data:
                 strategy.load_state(state)
-            if product in state.order_depths or product == "PICNIC_BASKET_GROUP" or product == "VOLCANIC_ROCK_GROUP":
+
+            # 马卡龙策略返回额外的conversions
+            macaron_orders, strategy_state, macaron_conversions = strategy.run(state)
+            orders["MAGNIFICENT_MACARONS"] = macaron_orders
+            new_trader_data["MAGNIFICENT_MACARONS"] = strategy_state
+            conversions = macaron_conversions
+
+        # 处理其他产品订单
+        for product, strategy in self.strategies.items():
+            # 跳过已处理的马卡龙
+            if product == "MAGNIFICENT_MACARONS":
+                continue
+
+            if product in trader_data or product == "PICNIC_BASKET_GROUP":
+                strategy.load_state(state)
+
+            if product in state.order_depths or product == "PICNIC_BASKET_GROUP":
                 product_orders, strategy_state = strategy.run(state)
+
                 # 处理group订单
                 if isinstance(product_orders, dict):
                     for symbol, symbol_orders in product_orders.items():
