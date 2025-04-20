@@ -1529,10 +1529,10 @@ class MacaronStrategy(Strategy):
                  symbol: str,
                  position_limit: int,
                  conversion_limit: int = 10,
-                 sun_threshold: int = 60,
-                 sun_coeff: float = 0.10,
+                 sun_threshold: int = 50,
+                 sun_coeff: float = 0,
                  sugar_threshold: int = 40,
-                 sugar_coeff: float = 0.08):
+                 sugar_coeff: float = 0):
         super().__init__(symbol, position_limit)
         self.conversion_limit = conversion_limit
         self.storage_cost = 0.1
@@ -1842,7 +1842,6 @@ class MacaronStrategy(Strategy):
             position_factor = 5 * position / self.position_limit
             adjusted_fair_value = fair_value - position_factor
 
-            '''
             # --- Pricing factors | 价格影响因素 ------------------------------
             sunlight_bonus = 0.0
             sugar_penalty = 0.0
@@ -1861,7 +1860,6 @@ class MacaronStrategy(Strategy):
 
             adjusted_fair_value = adjusted_fair_value + sunlight_bonus - sugar_penalty
             logger.print(f"delta fair value: {sunlight_bonus - sugar_penalty}")
-            '''
 
             best_bid = max(order_depth.buy_orders.keys())
             best_ask = min(order_depth.sell_orders.keys())

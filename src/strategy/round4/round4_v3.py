@@ -1530,10 +1530,10 @@ class MacaronStrategy(Strategy):
                  symbol: str,
                  position_limit: int,
                  conversion_limit: int = 10,
-                 sun_threshold: int = 60,
-                 sun_coeff: float = 0.10,
+                 sun_threshold: int = 45,
+                 sun_coeff: float = -0.10,
                  sugar_threshold: int = 40,
-                 sugar_coeff: float = 0.08):
+                 sugar_coeff: float = 0):
         super().__init__(symbol, position_limit)
         self.conversion_limit = conversion_limit
         self.storage_cost = 0.1
@@ -1776,7 +1776,7 @@ class MacaronStrategy(Strategy):
             sunlightIndex = None
         if sunlightIndex is not None:
             #根据SI或者相关系数设置突破条件
-            if sunlightIndex < 45 and self.current_mode == 'Normal' and self.sunlightIndex_slope < 0:
+            if sunlightIndex < 50 and self.current_mode == 'Normal' and self.sunlightIndex_slope < 0:
                 self.current_mode = "CSI"
 
         if len(self.sunlightIndex_history) > 5:
@@ -1840,10 +1840,9 @@ class MacaronStrategy(Strategy):
             fair_value = self.calculate_fair_value(order_depth)
 
             # 仓位调整系数 - 仓位越大，卖出意愿越强
-            position_factor = 5 * position / self.position_limit
+            position_factor = 3 * position / self.position_limit
             adjusted_fair_value = fair_value - position_factor
 
-            '''
             # --- Pricing factors | 价格影响因素 ------------------------------
             sunlight_bonus = 0.0
             sugar_penalty = 0.0
@@ -1862,7 +1861,6 @@ class MacaronStrategy(Strategy):
 
             adjusted_fair_value = adjusted_fair_value + sunlight_bonus - sugar_penalty
             logger.print(f"delta fair value: {sunlight_bonus - sugar_penalty}")
-            '''
 
             best_bid = max(order_depth.buy_orders.keys())
             best_ask = min(order_depth.sell_orders.keys())
@@ -1872,11 +1870,11 @@ class MacaronStrategy(Strategy):
 
             # 确定买入量
             available_buy = max(0, self.position_limit - position)
-            buy_penalty_factor = 0.5
+            penalty_factor = 0
             if available_buy > 0:
                 # 吃单逻辑：如果有比我们买价更便宜的卖单，直接吃入
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-                    if ask_price < adjusted_fair_value - 0.5 * (-ask_volume):
+                    if ask_price < adjusted_fair_value - penalty_factor * (-ask_volume):
                         buy_volume = min(-ask_volume, available_buy)
                         if buy_volume > 0:
                             orders.append(Order(self.symbol, ask_price, buy_volume))
@@ -1888,7 +1886,7 @@ class MacaronStrategy(Strategy):
                         break
 
                 # 挂单逻辑：在当前最高买价上方挂买单
-                if available_buy > 0 and buy_price < best_ask - 0.5 * (available_buy):
+                if available_buy > 0 and buy_price < best_ask - penalty_factor * (available_buy):
                     orders.append(Order(self.symbol, buy_price, available_buy))
 
             # 确定卖出量
@@ -1896,7 +1894,7 @@ class MacaronStrategy(Strategy):
             if available_sell > 0:
                 # 吃单逻辑：如果有比我们卖价更高的买单，直接卖出
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                    if bid_price > adjusted_fair_value:
+                    if bid_price > adjusted_fair_value - penalty_factor * bid_volume:
                         sell_volume = min(bid_volume, available_sell)
                         if sell_volume > 0:
                             orders.append(Order(self.symbol, bid_price, -sell_volume))
@@ -1908,12 +1906,12 @@ class MacaronStrategy(Strategy):
                         break
 
                 # 挂单逻辑：在当前最低卖价下方挂卖单
-                if available_sell > 0 and position > 0 and sell_price > best_bid:
+                if available_sell > 0 and position > 0 and sell_price > best_bid - penalty_factor * (available_sell):
                     orders.append(Order(self.symbol, sell_price, -available_sell))
 
         #做多
         if self.current_mode == "CSI":
-            if self.sunlightIndex_slope > 0 and self.sunlightIndex_history[-1] > 30: #退出条件
+            if self.sunlightIndex_history[-1]  + 250 * self.sunlightIndex_slope > 50: #退出条件
                 self.current_mode = "Closing position"
             #做多
             max_buy_amount, _ = self.get_available_amount(self.symbol, state)
@@ -1924,7 +1922,7 @@ class MacaronStrategy(Strategy):
 
         #做空
         if self.current_mode == "Closing position":
-            if position <= -70 and self.sunlightIndex_history[-1] > 40:
+            if position <= -70 and self.sunlightIndex_history[-1]  + 250 * self.sunlightIndex_slope > 60:
                 self.current_mode = "Normal"
             else:
                 _, max_sell_amount = self.get_available_amount(self.symbol, state)
