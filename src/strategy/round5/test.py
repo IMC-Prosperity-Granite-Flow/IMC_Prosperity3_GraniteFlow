@@ -1,5 +1,5 @@
 from typing import Dict, List
-from datamodel import OrderDepth, TradingState, Order
+from datamodel import OrderDepth, TradingState, Order, OwnTrade
 
 
 class Trader:
@@ -15,7 +15,7 @@ class Trader:
         for product in state.order_depths.keys():
             if product != 'MAGNIFICENT_MACARONS':
                 continue
-
+            
             order_depth: OrderDepth = state.order_depths[product]
 
             orders: list[Order] = []

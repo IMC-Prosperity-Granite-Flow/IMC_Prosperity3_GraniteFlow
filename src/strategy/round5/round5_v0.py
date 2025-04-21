@@ -1558,6 +1558,9 @@ class MacaronStrategy(Strategy):
             'short': []
         }
 
+        #记录其他交易者的
+        self.traders_info = {}
+
     def get_available_amount(self, symbol: str, state: TradingState) -> int:
         """
         返回市场上已有市价单的总数量
@@ -1675,7 +1678,7 @@ class MacaronStrategy(Strategy):
         # 计算总仓储成本
         position = state.position.get(self.symbol, 0)
         if position > 0:
-            self.storage_cost += 10 * state.position.get(self.symbol, 0)
+            self.storage_cost += 0.1 * state.position.get(self.symbol, 0)
         logger.print(self.storage_cost)
         return
 
@@ -1728,7 +1731,7 @@ class MacaronStrategy(Strategy):
         # conversion 卖出的收益
         sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
 
-        min_profit = 1 # 利润门槛
+        min_profit = 4 # 利润门槛
 
         if conversion_type == "BUY" and position < self.position_limit:
             # 假设当前是空头，可以通过 conversion 买入来平空，或者反手做多
@@ -1743,6 +1746,26 @@ class MacaronStrategy(Strategy):
 
     def process_market_data(self, state: TradingState):
         """处理市场数据并更新策略状态"""
+
+        #观察市场
+        market_trades = state.market_trades.get(self.symbol, [])
+        if market_trades:
+            for trade in market_trades:
+                buyer = trade.buyer
+                seller = trade.seller
+                price = trade.price
+                quantity = trade.quantity
+                timestamp = trade.timestamp
+
+            logger.print(f"Market trades: {market_trades}")
+        own_trades = state.own_trades.get(self.symbol, [])
+        if own_trades:
+            logger.print(f"Own trades: {own_trades}")
+            for trade in own_trades:
+                quantity = trade.quantity
+                price = trade.price
+                counter_party = trade.counter_party
+                print(f"counter_party: {counter_party}")
         position = state.position.get(self.symbol, 0)
         self.position_history.append(position)
         
@@ -1757,7 +1780,6 @@ class MacaronStrategy(Strategy):
         else: #如果没有数据，直接跳过
             return
         #记录糖价
-
         self.sugar_price_history.append(state.observations.conversionObservations["MAGNIFICENT_MACARONS"].sugarPrice)
         
         if state.observations.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex is not None:
@@ -1935,6 +1957,8 @@ class MacaronStrategy(Strategy):
         if conversions != 0:
             self.conversion_count += abs(conversions)
 
+        conversions = 0 #禁用转换
+
         # 保存策略状态
         strategy_state = self.save_state(state)
 
@@ -2017,7 +2041,6 @@ class Config:
                 "conversion_limit": 10
             }
         }
-
 
 class Trader:
     def __init__(self, product_config=None):
