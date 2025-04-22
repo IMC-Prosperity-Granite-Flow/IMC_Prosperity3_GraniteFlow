@@ -509,10 +509,8 @@ class MacaronStrategy(Strategy):
                     predicted_mid_price = None
 
                 signal = predicted_mid_price - fair_value if predicted_mid_price is not None else 0
-                price_bias = 0.5 * signal
+                logger.print(f"signal: {signal}")
                 
-
-
                 implied_bid = observation.bidPrice - observation.exportTariff - observation.transportFees - 0.1
                 implied_ask = observation.askPrice + observation.importTariff + observation.transportFees + 0.1
 
@@ -543,7 +541,6 @@ class MacaronStrategy(Strategy):
 
 
                 #make
-
                 aggressive_bid = round(observation.bidPrice) + 2
                 aggressive_ask = round(observation.askPrice) - 2
 
@@ -557,8 +554,6 @@ class MacaronStrategy(Strategy):
                 else:
                     ask = implied_ask + 2
 
-                ask = max(ask, best_ask - 1)
-                bid = min(bid, best_bid + 1)
                 if available_buy > 0:
                     orders.append(Order(self.symbol, int(bid), available_buy))
                 if available_sell > 0:
