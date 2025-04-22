@@ -169,20 +169,16 @@ class MacaronStrategy(Strategy):
     def __init__(self,
                  symbol: str,
                  position_limit: int,
-                 conversion_limit: int = 10,
-                 sun_threshold: int = 60,
-                 sun_coeff: float = 0.10,
-                 sugar_threshold: int = 40,
-                 sugar_coeff: float = 0.08):
+                 conversion_limit: int = 10):
         super().__init__(symbol, position_limit)
         self.conversion_limit = conversion_limit
         self.storage_cost = 0.1
         self.current_mode = "Normal"
 
-        self.sun_threshold = sun_threshold
-        self.sun_coeff = sun_coeff
-        self.sugar_threshold = sugar_threshold
-        self.sugar_coeff = sugar_coeff
+        # 回归系数
+        self.sugar_coeff = 7.9  
+        self.sunlight_coeff = -3.8
+        self.intercept = -686.55
 
         # 历史数据
         self.fair_value_history = deque(maxlen=100)
@@ -415,40 +411,17 @@ class MacaronStrategy(Strategy):
         cost = 2 * obs.transportFees + obs.importTariff + obs.exportTariff
         spread = best_ask - best_bid
 
-
-
-        #如果还有conversions目标，优先完成
-        if self.target_conversions != 0:
-            #计算实际进出口数量 target_amount = -conversion
-            self.target_amount = - (position - self.last_pos)
-            #根据实际进出口数量
-            conversions = min(self.target_conversions, self.conversion_limit) #进出口目标数量
-            self.target_conversions = self.target_conversions - conversions
-            self.target_amount = -conversions #需要配对的数量
-
-            #清零last_pos
-            self.last_pos = 0
-
-            return conversions
-        self.last_pos = position #记录仓位
-
-        if net_pos > 0:
-            # 有多头，考虑是否可以卖掉套利
-            if best_bid - avg_cost > 1:
-                conversions = -min(10, best_bid_amount)
-        elif net_pos < 0:
-            # 有空头，考虑是否可以买回套利
-            if avg_cost - best_ask > 1:
-                conversions = min(10, best_ask_amount)
+        if abs(position) <= 10:
+            conversions = -position
         else:
-            # 如果当前净仓为0，判断是否主动开仓套利
-            if spread > cost + 1.5:
-                conversion_amount = min(10, best_ask_amount, best_bid_amount)
-                conversions = -conversion_amount
-                self.target_amount = conversions
-                self.target_conversions = -conversions
+            conversions = - 10 * position / abs(position)
+        conversions = int(conversions)
 
-        return 0
+        #只有Normal模式下才conversions
+        if self.current_mode != "Normal":
+            conversion = 0
+        
+        return conversions
 
     def process_market_data(self, state: TradingState):
         """处理市场数据并更新策略状态"""
@@ -498,11 +471,13 @@ class MacaronStrategy(Strategy):
         else:
             self.sunlightIndex_slope = 0
 
+    def predict_mid(self, sugarPrice: float, sunlightIndex: float) -> float:
+        """预测两个timestamp后的mid_price"""
+        return self.intercept + self.sugar_coeff * sugarPrice + self.sunlight_coeff * sunlightIndex
     
     def generate_orders(self, state: TradingState) -> List[Order]:
         """生成订单和转换请求"""
         avg_cost, net_pos = self.calculate_avg_cost(state)
-        logger.print(self.storage_cost)
         orders = []
         order_depth = state.order_depths.get(self.symbol, OrderDepth())
         position = state.position.get(self.symbol, 0)
@@ -510,13 +485,85 @@ class MacaronStrategy(Strategy):
         # 如果没有订单深度数据
         if not order_depth.buy_orders and not order_depth.sell_orders:
             return orders
+        observation = state.observations.conversionObservations.get("MAGNIFICENT_MACARONS")
+
 
         #普通模式
         if self.current_mode == "Normal":
-            clear_factor = 3 if abs(position) > 10 else 1
-            clear_orders, _ = self.quick_trade(self.symbol, state, -position  / clear_factor ) #快速清仓
-            orders.extend(clear_orders)
 
+            # 获取最佳买卖价格
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
+
+            # 计算市场公允价值
+            fair_value = self.calculate_fair_value(order_depth)
+            available_buy = max(0, self.position_limit - position)
+            available_sell = max(0, position + self.position_limit)
+
+            #take
+            if observation is not None:
+                #预测糖价
+                if observation.sugarPrice is not None and observation.sunlightIndex is not None:
+                    predicted_mid_price = self.predict_mid(observation.sugarPrice, observation.sunlightIndex)
+                else:
+                    predicted_mid_price = None
+
+                signal = predicted_mid_price - fair_value if predicted_mid_price is not None else 0
+                price_bias = 0.5 * signal
+                
+
+
+                implied_bid = observation.bidPrice - observation.exportTariff - observation.transportFees - 0.1
+                implied_ask = observation.askPrice + observation.importTariff + observation.transportFees + 0.1
+
+                ask = round(observation.askPrice) - 2
+                edge = (ask - implied_ask) * 0.8 if ask > implied_ask else 0
+
+                for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
+                    if ask_price < implied_bid - edge:
+                        buy_volume = min(-ask_volume, available_buy)
+                        if buy_volume > 0:
+                            orders.append(Order(self.symbol, int(ask_price), int(buy_volume)))
+                            if available_buy <= 0:
+                                break
+                    else:
+                        break
+
+                for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                    if bid_price > implied_ask + edge:
+                        sell_volume = min(bid_volume, available_sell)
+                        if sell_volume > 0:
+                            orders.append(Order(self.symbol, int(bid_price), -sell_volume))
+                            available_sell -= sell_volume
+
+                            if available_sell <= 0:
+                                break
+                    else:
+                        break
+
+
+                #make
+
+                aggressive_bid = round(observation.bidPrice) + 2
+                aggressive_ask = round(observation.askPrice) - 2
+
+                bid = min(aggressive_bid, implied_bid - 1)
+
+                if aggressive_ask >= implied_ask + 0.5:
+                    ask = aggressive_ask
+
+                elif aggressive_ask + 1 >= implied_ask + 0.5:
+                    ask = aggressive_ask + 1
+                else:
+                    ask = implied_ask + 2
+
+                ask = max(ask, best_ask - 1)
+                bid = min(bid, best_bid + 1)
+                if available_buy > 0:
+                    orders.append(Order(self.symbol, int(bid), available_buy))
+                if available_sell > 0:
+                    orders.append(Order(self.symbol, int(ask), -available_sell))
+                
             return orders
 
         #做多
@@ -533,6 +580,8 @@ class MacaronStrategy(Strategy):
         #做空
         if self.current_mode == "Closing position":
             if position <= -70 and self.sunlightIndex_history[-1] > 40:
+                clear_orders, _ = self.quick_trade(self.symbol, state, -position) #快速清仓
+                orders.extend(clear_orders)
                 self.current_mode = "Normal"
             else:
                 _, max_sell_amount = self.get_available_amount(self.symbol, state)
@@ -552,10 +601,10 @@ class MacaronStrategy(Strategy):
         # 更新仓储成本
         self.update_conversion_cost(state)
         self.update_storage_cost(state)
-
+        logger.print(self.storage_cost)
         # 确定最优的转换数量
         conversions = self.determine_optimal_conversions(state)
-        conversions = 0
+
         # 生成普通订单
         orders = self.generate_orders(state)
 

@@ -414,7 +414,6 @@ class MacaronStrategy(Strategy):
         
         cost = 2 * obs.transportFees + obs.importTariff + obs.exportTariff
         spread = best_ask - best_bid
-        logger.print(f'spread: {spread}, cost: {cost}')
 
 
 
@@ -423,7 +422,6 @@ class MacaronStrategy(Strategy):
             #计算实际进出口数量 target_amount = -conversion
             self.target_amount = - (position - self.last_pos)
             #根据实际进出口数量
-            logger.print('converting')
             conversions = min(self.target_conversions, self.conversion_limit) #进出口目标数量
             self.target_conversions = self.target_conversions - conversions
             self.target_amount = -conversions #需要配对的数量
@@ -432,23 +430,27 @@ class MacaronStrategy(Strategy):
             self.last_pos = 0
 
             return conversions
-        self.last_pos = position #记录仓位
+        
 
-        if net_pos > 0:
-            # 有多头，考虑是否可以卖掉套利
-            if best_bid - avg_cost > 1:
-                conversions = -min(10, best_bid_amount)
-        elif net_pos < 0:
-            # 有空头，考虑是否可以买回套利
-            if avg_cost - best_ask > 1:
-                conversions = min(10, best_ask_amount)
+        self.last_pos = position #记录仓位
+                # === 判断套利机会 ===
+
+        # 如果当前净仓为0，判断是否主动开仓套利
+        if spread > cost + 2 and self.target_amount == 0:
+            conversion_amount = min(10, best_ask_amount, best_bid_amount)
+            conversions = -conversion_amount
+            self.target_amount = conversions
+            self.target_conversions = -conversions
         else:
-            # 如果当前净仓为0，判断是否主动开仓套利
-            if spread > cost + 1.5:
-                conversion_amount = min(10, best_ask_amount, best_bid_amount)
-                conversions = -conversion_amount
-                self.target_amount = conversions
-                self.target_conversions = -conversions
+            if net_pos > 0:
+                # 有多头，考虑是否可以卖掉套利
+                if best_bid - avg_cost > 1:
+                    conversions = -min(10, best_bid_amount)
+            elif net_pos < 0:
+                # 有空头，考虑是否可以买回套利
+                if avg_cost - best_ask > 1:
+                    conversions = min(10, best_ask_amount)
+
 
         return conversions
 
@@ -514,12 +516,14 @@ class MacaronStrategy(Strategy):
 
         #普通模式
         if self.current_mode == "Normal":
-            logger.print(f"target amount: {self.target_amount}, target conversions: {self.target_conversions}")
             if self.target_amount != 0:
                 #配对下单
                 target_orders, rest_amount = self.quick_trade(self.symbol, state, self.target_amount)
                 orders.extend(target_orders)
                 self.target_amount = rest_amount
+
+            elif position != 0:
+                clear_orders, _ = self.quick_trade(self.symbol, state, -position) #快速清仓
             else:
                 # 获取最佳买卖价格
                 best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
@@ -530,8 +534,8 @@ class MacaronStrategy(Strategy):
 
                 # 仓位调整系数 - 仓位越大，卖出意愿越强
                 position_factor = 5 * position / self.position_limit
-                #storage_factor = 0.2 * position if position > 0 else 0
-                adjusted_fair_value = fair_value - position_factor 
+                storage_factor = 0.2 * position if position > 0 else 0
+                adjusted_fair_value = fair_value - position_factor - storage_factor
 
                 best_bid = max(order_depth.buy_orders.keys())
                 best_ask = min(order_depth.sell_orders.keys())
@@ -555,6 +559,33 @@ class MacaronStrategy(Strategy):
                     available_sell -= sell_amount
                     orders.append(Order(self.symbol, buy_price, buy_amount))
                     orders.append(Order(self.symbol, sell_price, -sell_amount)) 
+                available_buy = max(0, self.position_limit - position - sum(order.quantity for order in orders if order.quantity > 0))
+                if available_buy > 0:
+                    for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
+                        if ask_price < adjusted_fair_value:
+                            buy_volume = min(-ask_volume, available_buy)
+                            if buy_volume > 0:
+                                orders.append(Order(self.symbol, ask_price, buy_volume))
+                                if available_buy <= 0:
+                                    break
+                        else:
+                            break
+                available_sell = max(0, position + self.position_limit - sum( - order.quantity for order in orders if order.quantity < 0))
+                if available_sell > 0:
+                    # 吃单逻辑：如果有比我们卖价更高的买单，直接卖出
+                    for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                        if bid_price > adjusted_fair_value:
+                            sell_volume = min(bid_volume, available_sell)
+                            if sell_volume > 0:
+                                orders.append(Order(self.symbol, bid_price, -sell_volume))
+                                available_sell -= sell_volume
+
+                                if available_sell <= 0:
+                                    break
+                        else:
+                            break
+                orders = []
+                
             return orders
 
         #做多
@@ -592,7 +623,7 @@ class MacaronStrategy(Strategy):
         # 更新仓储成本
         self.update_conversion_cost(state)
         self.update_storage_cost(state)
-
+        logger.print(self.storage_cost)
         # 确定最优的转换数量
         conversions = self.determine_optimal_conversions(state)
 
@@ -681,7 +712,6 @@ class Trader:
             orders["MAGNIFICENT_MACARONS"] = macaron_orders
             new_trader_data["MAGNIFICENT_MACARONS"] = strategy_state
             conversions = macaron_conversions
-        logger.print(conversions)
 
         # 处理其他产品订单
         for product, strategy in self.strategies.items():
