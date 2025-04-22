@@ -497,6 +497,9 @@ class MacaronStrategy(Strategy):
 
             # 计算市场公允价值
             fair_value = self.calculate_fair_value(order_depth)
+
+            mid_price = (best_ask + best_bid) / 2
+
             available_buy = max(0, self.position_limit - position)
             available_sell = max(0, position + self.position_limit)
 
@@ -508,7 +511,8 @@ class MacaronStrategy(Strategy):
                 else:
                     predicted_mid_price = None
 
-                signal = predicted_mid_price - fair_value if predicted_mid_price is not None else 0
+                signal = (predicted_mid_price - mid_price) * 0.1 if predicted_mid_price is not None else 0 #上涨信号
+                signal = np.clip(signal, -1, 1)
                 logger.print(f"signal: {signal}")
                 
                 implied_bid = observation.bidPrice - observation.exportTariff - observation.transportFees - 0.1
@@ -518,7 +522,7 @@ class MacaronStrategy(Strategy):
                 edge = (ask - implied_ask) * 0.8 if ask > implied_ask else 0
 
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-                    if ask_price < implied_bid - edge:
+                    if ask_price < implied_bid - edge :
                         buy_volume = min(-ask_volume, available_buy)
                         if buy_volume > 0:
                             orders.append(Order(self.symbol, int(ask_price), int(buy_volume)))
@@ -528,7 +532,7 @@ class MacaronStrategy(Strategy):
                         break
 
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-                    if bid_price > implied_ask + edge:
+                    if bid_price > implied_ask + edge :
                         sell_volume = min(bid_volume, available_sell)
                         if sell_volume > 0:
                             orders.append(Order(self.symbol, int(bid_price), -sell_volume))
@@ -555,9 +559,9 @@ class MacaronStrategy(Strategy):
                     ask = implied_ask + 2
 
                 if available_buy > 0:
-                    orders.append(Order(self.symbol, int(bid), available_buy))
+                    orders.append(Order(self.symbol, int(bid + signal), available_buy))
                 if available_sell > 0:
-                    orders.append(Order(self.symbol, int(ask), -available_sell))
+                    orders.append(Order(self.symbol, int(ask + signal), -available_sell))
                 
             return orders
 
