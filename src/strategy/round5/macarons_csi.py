@@ -514,48 +514,10 @@ class MacaronStrategy(Strategy):
 
         #普通模式
         if self.current_mode == "Normal":
-            logger.print(f"target amount: {self.target_amount}, target conversions: {self.target_conversions}")
-            if self.target_amount != 0:
-                #配对下单
-                target_orders, rest_amount = self.quick_trade(self.symbol, state, self.target_amount)
-                orders.extend(target_orders)
-                self.target_amount = rest_amount
-            else:
-                # 获取最佳买卖价格
-                best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-                best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float('inf')
+            clear_orders, _ = self.quick_trade(self.symbol, state, -position) #快速清仓
+            orders.extend(clear_orders)
 
-                # 计算市场公允价值
-                fair_value = self.calculate_fair_value(order_depth)
-
-                # 仓位调整系数 - 仓位越大，卖出意愿越强
-                position_factor = 5 * position / self.position_limit
-                #storage_factor = 0.2 * position if position > 0 else 0
-                adjusted_fair_value = fair_value - position_factor 
-
-                best_bid = max(order_depth.buy_orders.keys())
-                best_ask = min(order_depth.sell_orders.keys())
-                # 设置买卖价格
-                buy_price = best_bid + 1
-                sell_price = best_ask - 1
-                spread = best_ask - best_bid
-                buy_sum = sum(price * vol for price, vol in order_depth.buy_orders.items())
-                sell_sum = sum(price * -vol for price, vol in order_depth.sell_orders.items())
-                imbalance_ratio = buy_sum / (buy_sum + sell_sum)
-                position_ratio = position / self.position_limit
-
-                available_buy = max(0, self.position_limit - position)
-                available_sell = max(0, position + self.position_limit)
-                if spread > 4:
-                    buy_amount = min(5, available_buy * imbalance_ratio * (1 - position_ratio))
-                    buy_amount = int(buy_amount) if buy_amount <= 5 else 5
-                    available_buy -= buy_amount
-                    sell_amount = int(min(5, available_sell) * (1 - imbalance_ratio) * position_ratio)
-                    sell_amount = int(sell_amount) if sell_amount <= 5 else 5
-                    available_sell -= sell_amount
-                    orders.append(Order(self.symbol, buy_price, buy_amount))
-                    orders.append(Order(self.symbol, sell_price, -sell_amount)) 
-            return []
+            return orders
 
         #做多
         if self.current_mode == "CSI":
