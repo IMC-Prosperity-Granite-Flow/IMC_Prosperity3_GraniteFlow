@@ -191,7 +191,6 @@ class MacaronStrategy(Strategy):
 
         self.observation_history = deque(maxlen=100)
         self.position_history = deque(maxlen=100)
-        self.conversion_count = 0
         self.position_entries = {}
 
         self.sunlightIndex_slope = 0
@@ -317,7 +316,7 @@ class MacaronStrategy(Strategy):
             avg_cost = total_cost / short_qty if short_qty else 0.0
         else:
             avg_cost = 0.0
-
+        logger.print(avg_cost, net_pos)
         return avg_cost, net_pos
 
     def update_storage_cost(self, state: TradingState):
@@ -329,41 +328,16 @@ class MacaronStrategy(Strategy):
         return
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
-        """计算市场公允价值"""
+        """计算市场公允价值，买卖单一起按数量加权"""
 
-        def weighted_avg(prices_vols, n=3):
-            """计算加权平均价格"""
-            if not prices_vols:
-                return 0
+        buy_sum = sum(price * vol for price, vol in order_depth.buy_orders.items())
+        sell_sum = sum(price * -vol for price, vol in order_depth.sell_orders.items())
+        total_vol = sum(order_depth.buy_orders.values()) + sum(abs(vol) for vol in order_depth.sell_orders.values())
+        return (buy_sum + sell_sum) / total_vol if total_vol != 0 else 0
 
-            is_buy = isinstance(prices_vols, dict) and len(prices_vols) > 0 and next(iter(prices_vols.values())) > 0
-            sorted_orders = sorted(prices_vols.items(), key=lambda x: x[0], reverse=is_buy)[:n]
-
-            if not sorted_orders:
-                return 0
-
-            total_vol = sum(abs(vol) for _, vol in sorted_orders)
-            if total_vol == 0:
-                return 0
-
-            weighted_sum = sum(price * abs(vol) for price, vol in sorted_orders)
-            return weighted_sum / total_vol
-
-        buy_avg = weighted_avg(order_depth.buy_orders)
-        sell_avg = weighted_avg(order_depth.sell_orders)
-        if buy_avg > 0 and sell_avg > 0:
-            return (buy_avg + sell_avg) / 2
-        elif buy_avg > 0:
-            return buy_avg
-        elif sell_avg > 0:
-            return sell_avg
-        return 0
 
     def should_convert(self, state: TradingState, conversion_type: str) -> bool:
         """基于 avg_cost 判断是否可以通过 conversion 跨岛套利"""
-        if self.conversion_count >= self.conversion_limit:
-            return False
-
         if not state.observations or "MAGNIFICENT_MACARONS" not in state.observations.conversionObservations:
             return False
 
@@ -377,19 +351,46 @@ class MacaronStrategy(Strategy):
         # conversion 卖出的收益
         sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
 
-        min_profit_buy = 4 # 利润门槛
+        min_profit_buy = 3 # 利润门槛
         min_profit_sell = 0.1 
 
-        if conversion_type == "BUY" and position < self.position_limit:
+        if conversion_type == "BUY" :
             # 假设当前是空头，可以通过 conversion 买入来平空，或者反手做多
             # 判断当前持仓成本是否远高于跨岛买入
             return avg_cost > buy_cost + min_profit_buy
 
-        elif conversion_type == "SELL" and position > -self.position_limit:
+        elif conversion_type == "SELL" :
             # 假设当前是多头，可以通过 conversion 卖出
             return sell_revenue - avg_cost > min_profit_sell
 
         return False
+
+    def determine_optimal_conversions(self, state: TradingState) -> int:
+        """基于 avg_cost 判断并决定 conversion 数量"""
+        if not state.observations or "MAGNIFICENT_MACARONS" not in state.observations.conversionObservations:
+            return 0
+
+        position = state.position.get(self.symbol, 0)
+        obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
+        avg_cost, net_pos = self.calculate_avg_cost(state)
+
+        conversions = 0
+
+        buy_cost = obs.askPrice + obs.transportFees + obs.importTariff
+        sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
+
+        # 如果当前是空头或无仓位，可以从岛外买入（conversion）补仓/反手
+        if self.should_convert(state, "BUY"):
+            profit = avg_cost - buy_cost
+            conversions = 5
+
+        # 如果当前是多头，可以把仓位卖给岛外
+        elif self.should_convert(state, "SELL"):
+            profit = sell_revenue - avg_cost
+            conversions = -10
+
+        return conversions
+
 
     def process_market_data(self, state: TradingState):
         """处理市场数据并更新策略状态"""
@@ -440,34 +441,6 @@ class MacaronStrategy(Strategy):
             self.sunlightIndex_slope = 0
 
 
-    def determine_optimal_conversions(self, state: TradingState) -> int:
-        """基于 avg_cost 判断并决定 conversion 数量"""
-        if not state.observations or "MAGNIFICENT_MACARONS" not in state.observations.conversionObservations:
-            return 0
-
-        position = state.position.get(self.symbol, 0)
-        obs = state.observations.conversionObservations["MAGNIFICENT_MACARONS"]
-        avg_cost, net_pos = self.calculate_avg_cost(state)
-
-        conversions = 0
-
-        buy_cost = obs.askPrice + obs.transportFees + obs.importTariff
-        sell_revenue = obs.bidPrice - obs.transportFees - obs.exportTariff
-
-        # 如果当前是空头或无仓位，可以从岛外买入（conversion）补仓/反手
-        if self.should_convert(state, "BUY"):
-            profit = avg_cost - buy_cost
-            max_buy = min(self.conversion_limit - self.conversion_count, self.position_limit - position)
-            conversions = max_buy
-
-        # 如果当前是多头，可以把仓位卖给岛外
-        elif self.should_convert(state, "SELL"):
-            profit = sell_revenue - avg_cost
-            max_sell = min(self.conversion_limit - self.conversion_count, net_pos)
-            conversions = -max_sell
-
-        return conversions
-
     def generate_orders(self, state: TradingState) -> List[Order]:
         """生成订单和转换请求"""
         self.process_market_data(state)
@@ -493,7 +466,7 @@ class MacaronStrategy(Strategy):
 
             # 仓位调整系数 - 仓位越大，卖出意愿越强
             position_factor = 5 * position / self.position_limit
-            storage_factor = 0.1 * position if position > 0 else 0
+            storage_factor = 0.2 * position if position > 0 else 0
             adjusted_fair_value = fair_value - position_factor - storage_factor
 
             '''
@@ -522,9 +495,25 @@ class MacaronStrategy(Strategy):
             # 设置买卖价格
             buy_price = best_bid + 1
             sell_price = best_ask - 1
+            spread = best_ask - best_bid
+            buy_sum = sum(price * vol for price, vol in order_depth.buy_orders.items())
+            sell_sum = sum(price * -vol for price, vol in order_depth.sell_orders.items())
+            imbalance_ratio = buy_sum / (buy_sum + sell_sum)
+            position_ratio = position / self.position_limit
 
-            # 确定买入量
             available_buy = max(0, self.position_limit - position)
+            available_sell = max(0, position + self.position_limit)
+            if spread > 4:
+                buy_amount = min(5, available_buy * imbalance_ratio * (1 - position_ratio))
+                buy_amount = int(buy_amount) if buy_amount <= 15 else 15
+                available_buy -= buy_amount
+                sell_amount = int(min(5, available_sell) * (1 - imbalance_ratio) * position_ratio)
+                sell_amount = int(sell_amount) if sell_amount <= 15 else 15
+                available_sell -= sell_amount
+                orders.append(Order(self.symbol, buy_price, buy_amount))
+                orders.append(Order(self.symbol, sell_price, -sell_amount)) 
+            
+            
             if available_buy > 0:
                 # 吃单逻辑：如果有比我们买价更便宜的卖单，直接吃入
                 for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
@@ -533,18 +522,12 @@ class MacaronStrategy(Strategy):
                         if buy_volume > 0:
                             orders.append(Order(self.symbol, ask_price, buy_volume))
                             available_buy -= buy_volume
-
                             if available_buy <= 0:
                                 break
                     else:
                         break
-
-                # 挂单逻辑：在当前最高买价上方挂买单
-                if available_buy > 0 and buy_price < best_ask:
-                    orders.append(Order(self.symbol, buy_price, available_buy))
-
-            # 确定卖出量
-            available_sell = max(0, position + self.position_limit)
+        
+            
             if available_sell > 0:
                 # 吃单逻辑：如果有比我们卖价更高的买单，直接卖出
                 for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
@@ -559,9 +542,7 @@ class MacaronStrategy(Strategy):
                     else:
                         break
 
-                # 挂单逻辑：在当前最低卖价下方挂卖单
-                if available_sell > 0 and position > 0 and sell_price > best_bid:
-                    orders.append(Order(self.symbol, sell_price, -available_sell))
+            return []
 
         #做多
         if self.current_mode == "CSI":
@@ -594,12 +575,10 @@ class MacaronStrategy(Strategy):
         
         # 确定最优的转换数量
         conversions = self.determine_optimal_conversions(state)
-        if conversions != 0:
-            self.conversion_count += abs(conversions)
 
         # 保存策略状态
         strategy_state = self.save_state(state)
-
+        logger.print(conversions, orders)
         return orders, strategy_state, conversions
 
     def save_state(self, state) -> dict:
@@ -607,7 +586,6 @@ class MacaronStrategy(Strategy):
         return {
             "fair_value_history": list(self.fair_value_history),
             "position_history": list(self.position_history),
-            "conversion_count": self.conversion_count
         }
 
     def load_state(self, state):
@@ -626,8 +604,6 @@ class MacaronStrategy(Strategy):
                 if "position_history" in strategy_data:
                     self.position_history = deque(strategy_data["position_history"], maxlen=100)
 
-                if "conversion_count" in strategy_data:
-                    self.conversion_count = strategy_data["conversion_count"]
         except Exception as e:
             logger.print(f"Error loading state: {str(e)}")
 
@@ -684,8 +660,7 @@ class Trader:
             new_trader_data["MAGNIFICENT_MACARONS"] = strategy_state
             conversions = macaron_conversions
 
-        conversions = 0
-        
+
         # 处理其他产品订单
         for product, strategy in self.strategies.items():
             # 跳过已处理的马卡龙
